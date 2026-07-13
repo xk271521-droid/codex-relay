@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>Codex Relay</title>
+    <link rel="stylesheet" href="/app.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <img src="/icon.png" width="34" height="34" alt="">
+          <div><strong>Codex Relay</strong><span>本地模型路由</span></div>
+        </div>
+
+        <nav aria-label="主导航">
+          <button class="nav-item active" data-view="home"><i data-lucide="gauge"></i><span>概览</span></button>
+          <button class="nav-item" data-view="models"><i data-lucide="panel-top"></i><span>模型与供应商</span></button>
+          <button class="nav-item" data-view="activity"><i data-lucide="list-checks"></i><span>请求记录</span></button>
+          <button class="nav-item" data-view="safety"><i data-lucide="shield-check"></i><span>安全与恢复</span></button>
+        </nav>
+
+        <div class="sidebar-status">
+          <span class="status-dot" id="sidebar-dot"></span>
+          <div><strong id="sidebar-status">正在读取</strong><span>127.0.0.1:15723</span></div>
+        </div>
+        <div class="app-version" id="app-version">Codex Relay</div>
+      </aside>
+
+      <main class="main-content">
+        <header class="topbar">
+          <div>
+            <h1 id="view-title">概览</h1>
+            <p id="view-description">检查当前连接并控制 Relay 模式。</p>
+          </div>
+          <div class="top-actions">
+            <button class="button secondary" id="restore-top-button" data-action="restore" disabled><i data-lucide="rotate-ccw"></i><span>恢复使用前状态</span></button>
+            <button class="button primary" id="apply-button"><i data-lucide="power"></i><span>启用 Relay</span></button>
+          </div>
+        </header>
+
+        <section class="view" id="home-view">
+          <section class="control-panel" aria-labelledby="relay-control-title">
+            <div class="control-main">
+              <div class="mode-icon"><i data-lucide="route"></i></div>
+              <div class="mode-copy">
+                <span class="section-label">当前模式</span>
+                <h2 id="relay-control-title">正在检查 Codex 连接</h2>
+                <p id="relay-control-copy">读取本机配置和 Router 状态。</p>
+              </div>
+              <span class="mode-badge" id="mode-badge">检查中</span>
+            </div>
+            <dl class="connection-facts">
+              <div><dt>Codex 指向</dt><dd id="connection-target">读取中</dd></div>
+              <div><dt>官方账号</dt><dd id="official-account">读取中</dd></div>
+              <div><dt>可用模型</dt><dd id="available-models">0 / 7</dd></div>
+              <div><dt>恢复快照</dt><dd id="snapshot-state">未创建</dd></div>
+            </dl>
+          </section>
+
+          <section class="section-block">
+            <div class="section-heading">
+              <div><h2>模型栏</h2><p id="slot-summary">2 个官方位置，5 个自定义位置</p></div>
+              <button class="button quiet" data-action="show-models"><i data-lucide="settings-2"></i><span>管理模型</span></button>
+            </div>
+            <div class="slot-rail" id="slot-rail" aria-label="当前模型槽位"></div>
+          </section>
+
+          <section class="section-block split-section">
+            <div class="account-section">
+              <div class="section-heading compact"><div><h2>官方账号</h2><p>官方槽位使用 Codex 登录额度</p></div><span class="state-chip" id="login-state">读取中</span></div>
+              <p class="section-copy" id="login-summary">正在检查本机 Codex 登录状态。</p>
+              <div class="official-usage" id="official-usage" hidden>
+                <div><span>套餐</span><strong id="official-plan">官方账号</strong></div>
+                <div><span>5 小时用量</span><strong id="official-five-hour">由官方管理</strong></div>
+                <div><span>周用量</span><strong id="official-weekly">由官方管理</strong></div>
+              </div>
+              <button class="button secondary" id="verify-official"><i data-lucide="refresh-cw"></i><span>同步登录状态</span></button>
+            </div>
+            <div class="safety-section">
+              <div class="section-heading compact"><div><h2>聊天保护</h2><p>启用与恢复前自动核对</p></div><span class="state-chip safe" id="session-state">已开启</span></div>
+              <p class="section-copy" id="session-guard">Relay 不迁移、不覆盖 Codex 会话正文。</p>
+              <button class="button secondary" id="check-sessions"><i data-lucide="scan-search"></i><span>核对会话</span></button>
+            </div>
+          </section>
+
+          <section class="section-block">
+            <div class="section-heading">
+              <div><h2>供应商余额</h2><p>只显示你主动查询且供应商实际返回的余额</p></div>
+              <button class="button quiet" data-action="show-models"><i data-lucide="settings-2"></i><span>管理供应商</span></button>
+            </div>
+            <div class="balance-list" id="balance-list"></div>
+          </section>
+        </section>
+
+        <section class="view" id="models-view" hidden>
+          <section class="model-section">
+          <div class="section-heading">
+              <div><h2>官方模型</h2><p>登录后自动启用，使用官方账号额度</p></div>
+              <span class="capacity" id="official-capacity">0 / 2</span>
+            </div>
+            <div class="model-table" id="official-list"></div>
+          </section>
+
+          <section class="model-section">
+            <div class="section-heading">
+              <div><h2>第三方模型</h2><p>只把已完整配置的槽位写入 Codex 模型栏</p></div>
+              <span class="capacity" id="third-party-capacity">0 / 5</span>
+            </div>
+            <div class="model-table" id="third-party-list"></div>
+          </section>
+
+          <section class="model-section provider-section">
+            <div class="section-heading">
+              <div><h2>供应商</h2><p>API Key 使用 Windows DPAPI 加密，独立于 Codex 登录</p></div>
+              <button class="button secondary" id="add-provider"><i data-lucide="plus"></i><span>添加供应商</span></button>
+            </div>
+            <div class="provider-table" id="provider-list"></div>
+          </section>
+        </section>
+
+        <section class="view" id="activity-view" hidden>
+          <section class="activity-shell">
+            <div class="activity-header" aria-hidden="true"><span>时间</span><span>显示名称 / 实际上游</span><span>通道</span><span>状态</span><span>耗时</span><span>Token</span></div>
+            <div id="event-list"></div>
+          </section>
+        </section>
+
+        <section class="view" id="safety-view" hidden>
+          <section class="settings-group danger-zone">
+            <div class="settings-row">
+              <div class="setting-icon"><i data-lucide="rotate-ccw"></i></div>
+              <div><h2>恢复使用前状态</h2><p>只恢复本次启用 Relay 前的 Codex 配置和认证。Relay 中的供应商、模型与加密 Key 保留。</p></div>
+              <button class="button danger" id="restore-button" data-action="restore"><i data-lucide="undo-2"></i><span>退出并恢复</span></button>
+            </div>
+          </section>
+
+          <section class="settings-group">
+            <div class="settings-row">
+              <div class="setting-icon"><i data-lucide="messages-square"></i></div>
+              <div><h2>跨模型上下文</h2><p>关闭时只保留在本次运行内；开启后最多 200 条响应链会用 DPAPI 加密保存。</p></div>
+              <label class="switch-control"><input id="persist-context" type="checkbox"><span aria-hidden="true"></span><b>重启后保留</b></label>
+            </div>
+            <div class="settings-row">
+              <div class="setting-icon"><i data-lucide="database-backup"></i></div>
+              <div><h2>会话文件保护</h2><p id="session-detail">已有会话允许增长和归档，但不允许丢失、截断或覆盖旧正文。</p></div>
+              <button class="button secondary" id="check-sessions-secondary"><i data-lucide="scan-search"></i><span>立即核对</span></button>
+            </div>
+            <div class="settings-row desktop-only" hidden>
+              <div class="setting-icon"><i data-lucide="monitor-up"></i></div>
+              <div><h2>开机启动</h2><p>登录 Windows 后在后台启动 Router，并保留在系统托盘。</p></div>
+              <label class="switch-control"><input id="launch-at-login" type="checkbox"><span aria-hidden="true"></span><b>自动启动</b></label>
+            </div>
+            <div class="settings-row">
+              <div class="setting-icon"><i data-lucide="folder-lock"></i></div>
+              <div><h2>本地数据</h2><p id="data-directory">读取数据目录中</p></div>
+              <button class="button secondary desktop-only" id="open-data-folder" hidden><i data-lucide="folder-open"></i><span>打开目录</span></button>
+            </div>
+          </section>
+
+          <section class="security-note">
+            <i data-lucide="shield-check"></i>
+            <div><strong>凭据隔离</strong><p>官方认证只发送到官方 Codex 服务；每个第三方请求只使用对应供应商的 Key。</p></div>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="model-dialog" class="dialog">
+      <form method="dialog" id="model-form">
+        <div class="dialog-head"><div><span class="section-label">第三方模型</span><h2 id="model-dialog-title">添加模型</h2></div><button class="icon-button" type="button" data-dialog-close="model-dialog" aria-label="关闭"><i data-lucide="x"></i></button></div>
+        <input type="hidden" id="slot-id">
+        <label>模型栏显示名称<input id="slot-name" maxlength="48" placeholder="例如：DeepSeek V4 Pro" required></label>
+        <label>供应商<select id="provider-select" required></select></label>
+        <div class="model-picker">
+          <label for="slot-model">上游模型 ID</label>
+          <div class="input-action"><input id="slot-model" maxlength="120" autocomplete="off" placeholder="选择或直接输入模型 ID" required><button class="button secondary" type="button" id="choose-model"><i data-lucide="chevrons-up-down"></i><span>选择模型</span></button></div>
+          <div class="model-picker-meta"><span id="model-source">已提供常用模型建议，也可以手动填写</span><span class="model-picker-actions"><button class="text-button" type="button" id="load-models"><i data-lucide="list-restart"></i><span>读取模型</span></button><button class="text-button" type="button" id="test-model"><i data-lucide="flask-conical"></i><span>测试模型</span></button></span></div>
+          <p class="field-status" id="model-test-status" role="status" aria-live="polite"></p>
+        </div>
+        <button class="text-button" type="button" id="new-provider"><i data-lucide="plus"></i><span>新建供应商</span></button>
+        <details class="advanced"><summary>高级兼容设置</summary><div class="advanced-body"><label>上下文窗口<input id="slot-context" type="number" min="8000" value="128000"></label><label class="checkbox"><input id="slot-images" type="checkbox">该模型支持图片输入</label></div></details>
+        <div class="dialog-actions split-actions"><button class="button destructive-text" type="button" id="delete-model"><i data-lucide="trash-2"></i><span>清空槽位</span></button><div><button class="button secondary" type="button" data-dialog-close="model-dialog">取消</button><button class="button primary" id="save-model" value="default">保存模型</button></div></div>
+      </form>
+    </dialog>
+
+    <dialog id="model-picker-dialog" class="dialog picker-dialog">
+      <form method="dialog" id="model-picker-form">
+        <div class="dialog-head"><div><span class="section-label">上游模型 ID</span><h2>选择模型</h2></div><button class="icon-button" type="button" data-dialog-close="model-picker-dialog" aria-label="关闭"><i data-lucide="x"></i></button></div>
+        <label>筛选模型<input id="model-filter" autocomplete="off" placeholder="输入模型名称或 ID"></label>
+        <p class="dialog-copy" id="model-picker-copy">常用建议和已读取的模型都会显示在这里。</p>
+        <div class="model-options" id="model-options" role="listbox" aria-label="模型 ID 列表"></div>
+        <div class="dialog-actions"><button class="button secondary" type="button" data-dialog-close="model-picker-dialog">取消</button><button class="button primary" type="button" id="use-typed-model">使用当前输入</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="provider-dialog" class="dialog">
+      <form method="dialog" id="provider-form">
+        <div class="dialog-head"><div><span class="section-label">API 供应商</span><h2 id="provider-dialog-title">添加供应商</h2></div><button class="icon-button" type="button" data-dialog-close="provider-dialog" aria-label="关闭"><i data-lucide="x"></i></button></div>
+        <input type="hidden" id="provider-id">
+        <label>供应商名称<input id="provider-name" maxlength="48" placeholder="例如：DeepSeek" required></label>
+        <label>API 地址<input id="provider-url" type="url" placeholder="https://api.example.com/v1" required></label>
+        <div class="field-pair"><label>接口格式<select id="provider-api"><option value="chat_completions">Chat Completions</option><option value="responses">Responses</option></select></label><label>API Key<input id="provider-key" type="password" autocomplete="off" placeholder="仅加密保存在本机"></label></div>
+        <details class="advanced"><summary>高级兼容设置</summary><div class="advanced-body">
+          <label>完整请求地址（可选）<input id="provider-endpoint" type="url" placeholder="https://api.example.com/v1/responses"></label>
+          <div class="field-pair"><label>认证请求头<input id="provider-auth-header" maxlength="80" value="authorization"></label><label>Key 前缀<input id="provider-auth-prefix" maxlength="80" value="Bearer "></label></div>
+          <label>模型列表地址（可选）<input id="provider-model-list-url" type="url" placeholder="https://api.example.com/v1/models"></label>
+          <label>余额查询地址（可选）<input id="provider-balance-url" type="url" placeholder="https://api.example.com/dashboard/billing/credit_grants"></label>
+          <div class="field-pair"><label>余额字段路径（可选）<input id="provider-balance-path" maxlength="160" placeholder="data.balance"></label><label>余额币种（可选）<input id="provider-balance-currency" maxlength="12" placeholder="USD"></label></div>
+          <p class="field-hint">余额地址由供应商提供；查询时会使用此供应商的 Key。留空则不显示余额。</p>
+          <label>附加请求头（JSON）<textarea id="provider-extra-headers" rows="3" spellcheck="false" placeholder='{"User-Agent":"Codex Relay"}'></textarea></label>
+        </div></details>
+        <div class="dialog-actions split-actions"><button class="button destructive-text" type="button" id="delete-provider"><i data-lucide="trash-2"></i><span>删除供应商</span></button><div><button class="button secondary" type="button" data-dialog-close="provider-dialog">取消</button><button class="button primary" id="save-provider" value="default">保存供应商</button></div></div>
+      </form>
+    </dialog>
+
+    <dialog id="restore-dialog" class="dialog compact-dialog">
+      <form method="dialog" id="restore-form">
+        <div class="dialog-head"><div><span class="section-label">安全恢复</span><h2>退出 Relay 模式？</h2></div><button class="icon-button" type="button" data-dialog-close="restore-dialog" aria-label="关闭"><i data-lucide="x"></i></button></div>
+        <p class="dialog-copy">Codex 将恢复到本次使用 Relay 之前的配置和认证。对话、插件、Relay 供应商、模型名称和加密 Key 都会保留。</p>
+        <p class="dialog-warning" id="restore-warning" hidden>检测到 Relay 启用后配置又被其他工具修改。恢复将回到最初进入 Relay 前的状态。</p>
+        <label class="checkbox confirm-check"><input id="restore-confirm" type="checkbox">我确认退出 Relay 并恢复原状态</label>
+        <div class="dialog-actions"><button class="button secondary" type="button" data-dialog-close="restore-dialog">取消</button><button class="button danger" id="confirm-restore" value="default" disabled>退出并恢复</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="apply-dialog" class="dialog compact-dialog">
+      <form method="dialog" id="apply-form">
+        <div class="dialog-head"><div><span class="section-label">应用到 Codex</span><h2>启用 Relay 模式？</h2></div><button class="icon-button" type="button" data-dialog-close="apply-dialog" aria-label="关闭"><i data-lucide="x"></i></button></div>
+        <p class="dialog-copy" id="apply-copy"></p>
+        <ul class="preflight-list" id="apply-preflight"></ul>
+        <div class="dialog-actions"><button class="button secondary" type="button" data-dialog-close="apply-dialog">取消</button><button class="button primary" id="confirm-apply" value="default">确认启用</button></div>
+      </form>
+    </dialog>
+
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+    <script src="/vendor/lucide.min.js"></script>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

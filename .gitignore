@@ -1,0 +1,8 @@
+node_modules/
+.codex-relay/
+*.log
+work/
+outputs/
+
+# Local one-off maintenance scripts can contain machine and task identifiers.
+scripts/migrate-current-thread-to-relay.mjs
