@@ -1,62 +1,32 @@
 # Codex Relay
 
-Codex Relay 是一个 Windows 本地多模型 Router 和桌面管理器。它的目标是在保留用户真实 Codex 官方登录的同时，把最多五个用户配置的第三方模型加入同一个 Codex 模型选择入口。
-
-> 当前版本是开发与实机验收阶段。路由、流式、配置快照和桌面壳已经实现，但两个官方候选模型、完整官方账号页和闭源 Codex Desktop 模型菜单仍需真实账号验证。请不要把本项目当作已经稳定发布的官方集成。
-
-## 产品约定
-
-- 两个官方容量位，只有检测并保存真实官方认证后才发布。
-- 最多五个第三方槽位，每个槽位可自定义显示名、供应商和上游模型 ID。
-- 一个供应商可被多个槽位复用，支持 OpenAI-compatible Responses 或 Chat Completions。
-- 空槽位不写入 Codex；未登录时不伪造官方模型或账号状态。
-- 普通模型切换由 Codex 模型栏完成，不需要反复改配置或重启 Router。
-- 官方和第三方凭据严格隔离；第三方 Key 使用当前 Windows 用户的 DPAPI 加密。
-- 上游未返回 usage 时，请求记录显示“未返回”，不会估算成真实 Token。
-
-## 工作方式
+Codex Relay 是 Windows 本地多模型 Router 与桌面管理器。它保留 Codex 的官方登录和官方模型，同时将兼容的第三方 Responses、Chat Completions 和 DeepSeek 模型发布到 Codex 的同一模型选择器中。
 
 ```text
 Codex Desktop
-  -> Codex Relay（127.0.0.1:15723）
-     -> 官方 Codex Responses（用户官方登录）
-     -> 第三方 Responses
-     -> 第三方 Chat Completions（转换为 Responses SSE）
+  -> Codex Relay (127.0.0.1:15723)
+     -> OpenAI official Responses
+     -> Third-party Responses over HTTP/SSE
+     -> Chat/DeepSeek Chat Completions
 ```
 
-官方 Responses 流按数据块透传。第三方 Chat Completions 流会实时转换为 Codex 需要的 Responses SSE，并保留工具调用、取消和可见上下文记录。
+## 功能
 
-同一路线优先使用其原生响应链；跨官方与第三方、或跨第三方路线时，Relay 重放可见对话和工具结果，不传递其他供应商的响应 ID。便携上下文会增加输入 Token，也不能包含另一个模型的隐藏状态，因此不承诺无损继承。
+- 在官方模型与第三方模型之间按请求切换，无需为普通切换重启 Router。
+- 管理多个供应商、模型、网络出口和 API Key；Key 仅保存在当前 Windows 用户的本机加密存储中。
+- 提供模型检测、请求记录、Token/缓存信息、使用量统计和本地主题管理。
+- 在“安全与恢复”中显式启用 Relay、恢复启用前的 Codex 配置，或切回官方直连。
+- 官方和第三方路由隔离。第三方普通聊天采用单次 HTTP/SSE 转发，不自动重发、不自动续接、不替第三方写入 `store`。
 
-## 配置与恢复边界
+## 要求
 
-编辑模型或供应商只修改 Relay 自己的数据。只有用户显式点击“保存并应用到 Codex”后，Relay 才会：
+- Windows 10/11
+- 已安装并登录 Codex Desktop
+- Node.js `>=22.16.0`
 
-1. 检查 Router、可用模型、第三方 Key、官方认证、配置可写性和会话保护清单；
-2. 保存本次进入 Relay 前的 `config.toml` 与 `auth.json`；
-3. 写入本地模型目录和 localhost Router 地址；
-4. 验证失败时事务回滚。
+## 从源码运行
 
-重复应用不会覆盖本次使用前快照。打开管理页和读取状态不会修改 Codex。若 CC Switch、官方直连或手动配置已完整接管，Relay 只报告“外部接管”，不会自动抢回。
-
-“恢复使用前状态”只恢复本次进入 Relay 前的 Codex 配置和认证。它不会删除：
-
-- Relay 供应商、模型名称和槽位；
-- 加密的第三方 Key；
-- 可选的加密上下文缓存；
-- Codex 聊天、任务和插件。
-
-关闭窗口只隐藏到托盘。退出 Codex Relay 也不会自动恢复；如果 Codex 仍指向 Relay，退出会停止 Router，并在退出前给出警告。
-
-## 本地数据
-
-Relay 数据默认保存在 `%USERPROFILE%\.codex-relay`。应用只绑定 `127.0.0.1`，不会把管理器暴露到局域网。
-
-Relay 不迁移或合并 Codex 会话数据库。应用与恢复时会对已有会话文件做有限的缺失、缩短和前缀变化检查，但这不是完整数据库一致性证明，也不能保证闭源 Codex Desktop 在所有身份状态下都显示相同任务列表。
-
-## 开发
-
-要求 Node.js `>=22.15.0`。
+在项目目录执行：
 
 ```powershell
 npm.cmd install
@@ -64,32 +34,37 @@ npm.cmd test
 npm.cmd run desktop
 ```
 
-仅启动本地 Web 管理器和 Router：
+`npm.cmd run desktop` 会打开桌面管理器并启动本地 Router。首次安装 Electron 等依赖可能需要几分钟。
+
+如只需要本地管理页和 Router：
 
 ```powershell
 npm.cmd start
 ```
 
-管理地址为 `http://127.0.0.1:15723`。
+然后打开 `http://127.0.0.1:15723`。
 
-构建 Windows 安装版和便携版：
+## 配置与使用
+
+1. 启动桌面管理器，确认概览页显示 Router 正在运行，并确认官方登录状态。
+2. 在“供应商”中填写第三方服务的接口地址、协议、网络设置和 API Key。
+3. 在“模型”中添加需要发布的第三方模型；官方模型由已登录的 Codex 账号提供。
+4. 在“安全与恢复”中确认并点击“启用 Relay”或“更新 Relay”。这一步才会将 Codex 指向本地 Router。
+5. 回到 Codex Desktop，在模型选择器中选择相应模型开始使用。
+
+需要停止通过 Relay 路由时，请先完全退出 Codex，再在“安全与恢复”中选择“退出并恢复”或“切回官方”。前者恢复启用 Relay 前的 Codex 配置与认证；后者恢复官方默认直连。Relay 的本地供应商设置、加密 Key 和请求记录不会因此删除。
+
+## 数据与安全
+
+- Router 仅监听 `127.0.0.1:15723`，不对局域网开放。
+- 供应商 Key 和可选的跨模型上下文使用 Windows DPAPI 绑定到当前用户保存。
+- 请求记录会脱敏；不要将本机数据目录、日志或 `CODEX_RELAY_HOME` 中的文件提交到 Git。
+- 使用第三方供应商前，请自行确认其数据处理、价格、模型能力和服务条款。
+
+## 开发
 
 ```powershell
-npm.cmd run build:desktop
+npm.cmd test
 ```
 
-构建产物输出到工作区的 `releases` 目录。
-
-## 发布前验收
-
-稳定版至少需要通过：
-
-- 完整自动化测试；
-- 真实官方账号的完整账号页、额度、插件、两个官方模型和工具调用；
-- 一个真实 Responses 第三方和一个真实 Chat Completions 第三方；
-- 官方互切、官方/第三方互切、第三方互切和上下文/Token 对照；
-- 未登录后登录、Windows 代理切换和 CC Switch 外部接管；
-- 精确恢复 config/auth，且 Relay 设置、聊天和插件保留；
-- 安装版、便携版、托盘、单实例、退出警告和多尺寸 UI。
-
-产品目标与限制见 [PRODUCT.md](./PRODUCT.md)，界面和桌面验收要求见 [DESIGN.md](./DESIGN.md)。第三方代码归属见 [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)。
+本仓库包含从源码运行所需的应用代码、测试、启动入口和第三方版权声明。第三方归属与许可证信息见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

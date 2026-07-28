@@ -1,9 +1,10 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { chromium } from "playwright-core";
 
 const endpoint = process.argv[2] || "http://127.0.0.1:9223";
-const output = path.resolve(process.argv[3] || "work/visual-check");
+const output = path.resolve(process.argv[3] || path.join(os.homedir(), "AppData", "Local", "Codex Relay", "checks", "visual"));
 fs.mkdirSync(output, { recursive: true });
 
 const browser = await chromium.connectOverCDP(endpoint);

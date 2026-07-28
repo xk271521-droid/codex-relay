@@ -4,9 +4,11 @@ import { fileURLToPath } from "node:url";
 import { createRelayServer } from "../src/server.js";
 import { ROUTER_HOST, ROUTER_PORT } from "../src/constants.js";
 import { paths, relayApplicationStatus } from "../src/store.js";
+import { closeCcSwitchForHandoff } from "../src/external-processes.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const APP_URL = `http://${ROUTER_HOST}:${ROUTER_PORT}`;
+const WINDOW_ICON = path.join(ROOT, "assets", process.platform === "win32" ? "icon.ico" : "icon.png");
 const gotLock = app.requestSingleInstanceLock();
 
 let mainWindow;
@@ -18,13 +20,17 @@ let closeNoticeShown = false;
 if (!gotLock) app.quit();
 
 app.setName("Codex Relay");
-app.setAppUserModelId("io.codexrelay.desktop");
+if (app.isPackaged) app.setAppUserModelId("io.codexrelay.desktop");
 
-app.on("second-instance", () => showWindow());
+app.on("second-instance", async () => {
+  await enforceRelayOwnership();
+  showWindow();
+});
 
 app.whenReady().then(async () => {
   registerDesktopBridge();
   await ensureRouter();
+  await enforceRelayOwnership();
   createTray();
   createWindow();
 }).catch((error) => {
@@ -69,6 +75,17 @@ async function currentHealth() {
   }
 }
 
+async function enforceRelayOwnership() {
+  if (!relayApplicationStatus().configMatches) return { active: false, closed: 0 };
+  try {
+    const handoff = await closeCcSwitchForHandoff();
+    return { active: true, closed: handoff.closed || 0 };
+  } catch (error) {
+    console.error("Codex Relay could not close CC Switch while Relay is active: " + (error.message || error));
+    return { active: true, closed: 0, error: error.message || String(error) };
+  }
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     title: "Codex Relay",
@@ -79,7 +96,7 @@ function createWindow() {
     show: false,
     autoHideMenuBar: true,
     backgroundColor: "#f7f7f5",
-    icon: path.join(ROOT, "assets", "icon.png"),
+    icon: WINDOW_ICON,
     webPreferences: {
       preload: path.join(ROOT, "desktop", "preload.cjs"),
       contextIsolation: true,

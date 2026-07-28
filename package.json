@@ -1,7 +1,7 @@
 {
   "name": "codex-relay",
   "productName": "Codex Relay",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Local hybrid model router and desktop manager for Codex on Windows.",
   "author": "Codex Relay Contributors",
   "private": true,
@@ -11,55 +11,21 @@
     "start": "node src/server.js",
     "desktop": "electron .",
     "generate:icons": "node scripts/generate-icons.mjs",
-    "test": "node --test test/catalog-and-store.test.js",
-    "check": "npm run test",
-    "build:desktop": "npm run generate:icons && node scripts/build-desktop.mjs"
+    "report:s4a": "node scripts/s4a-performance-report.mjs",
+    "test": "node --test --test-concurrency=1 test/catalog-and-store.test.js test/cc-relay-differential.test.js",
+    "check": "npm run test"
   },
   "engines": {
-    "node": ">=22.15.0"
+    "node": ">=22.16.0"
   },
   "dependencies": {
-    "lucide": "^1.24.0"
+    "lucide": "^1.24.0",
+    "ws": "^8.21.1"
   },
   "devDependencies": {
     "electron": "42.4.1",
-    "electron-builder": "^26.15.3",
     "playwright-core": "^1.55.0",
     "png-to-ico": "^3.0.2",
     "sharp": "^0.35.3"
-  },
-  "build": {
-    "appId": "io.codexrelay.desktop",
-    "productName": "Codex Relay",
-    "asar": true,
-    "directories": {
-      "output": "../releases"
-    },
-    "files": [
-      "desktop/**/*",
-      "src/**/*",
-      "public/**/*",
-      "assets/**/*",
-      "package.json"
-    ],
-    "win": {
-      "icon": "assets/icon.ico",
-      "artifactName": "Codex-Relay-${version}-${arch}.${ext}",
-      "target": [
-        "portable",
-        "nsis"
-      ]
-    },
-    "portable": {
-      "artifactName": "Codex-Relay-${version}-Windows-Portable.${ext}"
-    },
-    "nsis": {
-      "artifactName": "Codex-Relay-${version}-Windows-Setup.${ext}",
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true,
-      "shortcutName": "Codex Relay"
-    }
   }
 }

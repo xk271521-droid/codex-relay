@@ -1,5 +1,10 @@
 import zlib from "node:zlib";
 
+// Image-heavy Codex tasks can legitimately exceed the older 25 MiB HTTP
+// ceiling. Keep the Responses route aligned with the 64 MiB WebSocket frame
+// limit while management endpoints retain their smaller explicit limits.
+export const RESPONSES_BODY_LIMIT_BYTES = 64 * 1024 * 1024;
+
 // Adapted from CodexBridge's MIT-licensed request decoding approach.
 // See THIRD_PARTY_NOTICES.md for attribution and license text.
 export async function readJsonRequest(req, limitBytes = 25 * 1024 * 1024) {

@@ -1,8 +1,30 @@
 node_modules/
 .codex-relay/
 *.log
+
+# Local generated output.
 work/
 outputs/
 
-# Local one-off maintenance scripts can contain machine and task identifiers.
-scripts/migrate-current-thread-to-relay.mjs
+# Internal project management and verification material. These files remain in
+# the local workspace but are intentionally excluded from the public source repo.
+AGENTS.md
+COMPATIBILITY_AND_SAFETY.md
+CURRENT_STATE.md
+DESIGN.md
+PRODUCT.md
+PROJECT_PLAN.md
+PHASE_EXECUTION_PLAN.md
+design-qa.md
+docs/
+videos/
+
+# One-off diagnostics and local repair helpers, not required to run Relay.
+Repair-Computer-Use.cmd
+scripts/generate-enfp-theme-asset.mjs
+scripts/generate-scrapbook-theme-asset.mjs
+scripts/model-health-visual-check.mjs
+scripts/monitoring-visual-check.mjs
+scripts/repair-codex-computer-use.ps1
+scripts/theme-task-visual-check.mjs
+scripts/theme-visual-check.mjs
