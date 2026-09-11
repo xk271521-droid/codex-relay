@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
+import { createArchivePathRepairMonitor } from "./archive-path-repair-monitor.js";
 import { buildModelCatalog, activeRoutes } from "./catalog.js";
 import { computerUseEnvironment } from "./computer-use-status.js";
 import { compactCapabilityStatus, compactCapabilityTarget } from "./compact-capabilities.js";
@@ -14,13 +15,14 @@ import { closeCcSwitchForHandoff, externalProcessStatus, reopenCcSwitchAfterRoll
 import { fetchOfficialModels } from "./official-models.js";
 import { fetchOfficialUsageWithTimeout } from "./official-usage.js";
 import { applyTheme, ensureThemeAgent, restoreDefaultTheme, selectTheme, themeView } from "./theme-manager.js";
-import { createChatHistory, forwardOfficialImageGeneration, forwardResponses, forwardResponsesCompact, hasCompactionTrigger, isEventStreamResponse, providerCompactEndpoint, recordPassthroughResponse, responseContextMode, responseDiagnostics, responseHistoryInfo, responseManagesHistory, responseReasoningMode, routeForRequest, routingContextMode } from "./router.js";
-import { readJsonRequest, RESPONSES_BODY_LIMIT_BYTES } from "./request-body.js";
+import { createChatHistory, forwardOfficialImageEdit, forwardOfficialImageGeneration, forwardResponses, forwardResponsesCompact, hasCompactionTrigger, isEventStreamResponse, providerCompactEndpoint, recordPassthroughResponse, responseContextMode, responseDiagnostics, responseHistoryInfo, responseManagesHistory, responseReasoningMode, routeForRequest, routingContextMode } from "./router.js";
+import { IMAGE_EDIT_BODY_LIMIT_BYTES, readJsonRequest, readRawRequest, RESPONSES_BODY_LIMIT_BYTES } from "./request-body.js";
 import { closeRequestHistoryWriter, clearRequestHistory, enqueueRequestHistory, flushRequestHistory, listRequestHistory, primeRequestHistoryCache, requestHistoryCachedSummary, requestHistoryWriterState, usageStatistics } from "./request-history.js";
 import { closeContextCacheWriter, enqueueContextCache, flushContextCacheWriter } from "./context-cache.js";
 import { applyReasoningToChatPayload, applyReasoningToResponsesPayload, capabilityFromModelItem, REASONING_PRESETS, resolveModelCapability } from "./model-capabilities.js";
 import { fetchProvider, normalizeProviderProxyUrl, providerNetworkLabel, providerNetworkMode } from "./provider-fetch.js";
 import { attachResponsesWebSocket } from "./responses-websocket.js";
+import { inspectCodexArchivePathCompatibility, repairCodexArchivePaths, rollbackCodexArchivePaths } from "./session-history.js";
 import {
   applyRelayConfig,
   captureOfficialAuth,
@@ -76,6 +78,7 @@ const chatHistory = createChatHistory(loadContextCache(), (entries) => {
   }, 1_200);
 });
 let server;
+let archivePathRepairMonitor;
 let lastOfficialAuthState = null;
 let officialUsageSnapshot = null;
 
@@ -197,6 +200,7 @@ function app(options = {}) {
       if (req.method === "POST" && ["/v1/responses", "/responses"].includes(url.pathname)) return await handleResponses(req, res, thirdPartyHttpLimits(options.thirdPartyHttp));
       if (req.method === "POST" && ["/v1/responses/compact", "/responses/compact"].includes(url.pathname)) return await handleResponsesCompact(req, res);
       if (req.method === "POST" && ["/v1/images/generations", "/images/generations"].includes(url.pathname)) return await handleImageGeneration(req, res);
+      if (req.method === "POST" && ["/v1/images/edits", "/images/edits"].includes(url.pathname)) return await handleImageEdit(req, res);
       if (url.pathname.startsWith("/api/")) return await handleApi(req, res, url);
       return await serveUi(req, res, url);
     } catch (error) {
@@ -289,6 +293,7 @@ async function handleResponses(req, res, thirdPartyHttp = thirdPartyHttpLimits()
       : `${route.provider.name} using ${providerNetworkLabel(route.provider)}`;
     throw apiError(502, `The local Router could not reach ${target}. Check that route's API address and network setting.`, "upstream_unreachable");
   } finally {
+    if (route.kind === "third_party") archivePathRepairMonitor?.notifyThirdPartyTurn();
     inFlight.release();
   }
 }
@@ -315,6 +320,7 @@ async function handleResponsesCompact(req, res) {
     res.writeHead(classified.response.status, { "content-type": classified.response.headers.get("content-type") || "application/json" });
     res.end(text);
   } finally {
+    if (route.kind === "third_party") archivePathRepairMonitor?.notifyThirdPartyTurn();
     inFlight.release();
   }
 }
@@ -330,6 +336,9 @@ async function handleApi(req, res, url) {
   if (method === "GET" && url.pathname === "/api/themes") return json(res, 200, themeView());
   if (method === "GET" && url.pathname === "/api/login-status") return json(res, 200, codexLoginStatus());
   if (method === "GET" && url.pathname === "/api/session-inventory") return json(res, 200, sessionInventoryView());
+  if (method === "GET" && url.pathname === "/api/archive-compatibility") return json(res, 200, inspectCodexArchivePathCompatibility());
+  if (method === "POST" && url.pathname === "/api/archive-compatibility/repair") return repairArchiveCompatibility(res);
+  if (method === "POST" && url.pathname === "/api/archive-compatibility/rollback") return rollbackArchiveCompatibility(res);
   if (method === "GET" && url.pathname === "/api/model-health") return json(res, 200, modelHealthView());
   if (method === "GET" && url.pathname === "/api/third-party-inflight") return json(res, 200, thirdPartyInFlightView());
   if (method === "GET" && url.pathname === "/api/usage-statistics") return await usageStatisticsResponse(res);
@@ -528,9 +537,10 @@ async function saveProvider(req, res) {
     balanceSnapshot: sameOrigin ? existing.balanceSnapshot : null,
     balanceProbe: sameOrigin ? existing.balanceProbe : { status: "never", checkedAt: null },
     apiType: input.apiType === "responses" ? "responses" : "chat_completions",
+    responsesCompatibility: input.apiType === "responses" && input.responsesCompatibility === "deepseek" ? "deepseek" : "standard",
     networkMode,
     proxyUrl,
-    nativeResponseContinuation: input.apiType === "responses" && input.nativeResponseContinuation === true,
+    nativeResponseContinuation: input.apiType === "responses" && input.responsesCompatibility !== "deepseek" && input.nativeResponseContinuation === true,
     note: existing?.note || "",
     authHeaderName: sameOrigin ? existing.authHeaderName : "authorization",
     authHeaderPrefix: sameOrigin ? existing.authHeaderPrefix : "Bearer ",
@@ -641,6 +651,24 @@ async function testProviderModel(req, res, url) {
   json(res, 200, { ok: true, providerId: provider.id, model, status: result.status, durationMs: result.durationMs, reasoning: result.reasoning, usage: result.usage });
 }
 
+function repairArchiveCompatibility(res) {
+  try {
+    const result = repairCodexArchivePaths();
+    return json(res, 200, result);
+  } catch (error) {
+    throw apiError(409, error.message || "第三方线程归档兼容修复失败。", error.code || "archive_path_repair_failed");
+  }
+}
+
+function rollbackArchiveCompatibility(res) {
+  try {
+    const result = rollbackCodexArchivePaths();
+    return json(res, 200, result);
+  } catch (error) {
+    throw apiError(409, error.message || "第三方线程归档兼容回滚失败。", error.code || "archive_path_rollback_failed");
+  }
+}
+
 async function handleImageGeneration(req, res) {
   const settings = loadSettings();
   if (!settings.router.running) throw apiError(503, "Codex Relay is not applied. Open the local manager and apply a configured route first.", "router_disabled");
@@ -671,6 +699,43 @@ async function handleImageGeneration(req, res) {
     logEvent({ route, status, durationMs: Date.now() - started, ok: false, contextMode: "official_image_generation", request });
     if (error.statusCode) throw error;
     throw apiError(502, "The local Router could not reach the official Codex image generation service. Check the official login and Windows network connection.", "upstream_unreachable");
+  }
+}
+
+async function handleImageEdit(req, res) {
+  const settings = loadSettings();
+  if (!settings.router.running) throw apiError(503, "Codex Relay is not applied. Open the local manager and apply a configured route first.", "router_disabled");
+  const contentType = String(headerValue(req.headers, "content-type") || "");
+  if (!isOfficialImageEditContentType(contentType)) {
+    throw apiError(415, "Reference-image editing requires application/json or multipart/form-data.", "image_edit_content_type");
+  }
+  const body = await readRawRequest(req, IMAGE_EDIT_BODY_LIMIT_BYTES);
+  const route = {
+    kind: "official",
+    id: "official-image-edit",
+    displayName: "Official image edit",
+    upstreamModel: "gpt-image",
+  };
+  const started = Date.now();
+  const request = binaryRequestMetrics(body.length, req.headers);
+  try {
+    const upstream = await forwardOfficialImageEdit({ body, contentType, headers: req.headers, signal: abortSignal(req, res) });
+    const text = await upstream.text();
+    const upstreamError = officialUpstreamFailure(route, upstream.status, text);
+    logEvent({ route, status: upstream.status, durationMs: Date.now() - started, ok: upstream.ok, contextMode: "official_image_edit", request, usage: usageFromResponseText(text), error: upstreamError });
+    if (upstreamError) return json(res, upstream.status, { error: upstreamError });
+    const responseHeaders = { "content-type": upstream.headers.get("content-type") || "application/json" };
+    for (const name of ["x-request-id", "openai-request-id", "openai-processing-ms", "openai-version"]) {
+      const value = upstream.headers.get(name);
+      if (value) responseHeaders[name] = value;
+    }
+    res.writeHead(upstream.status, responseHeaders);
+    res.end(text);
+  } catch (error) {
+    const status = error.statusCode || 502;
+    logEvent({ route, status, durationMs: Date.now() - started, ok: false, contextMode: "official_image_edit", request });
+    if (error.statusCode) throw error;
+    throw apiError(502, "The local Router could not reach the official Codex image editing service. Check the official login and Windows network connection.", "upstream_unreachable");
   }
 }
 
@@ -1080,6 +1145,7 @@ async function saveSlot(req, res) {
   if (!THIRD_PARTY_SLOT_IDS.includes(slot.id)) throw apiError(400, "Invalid model slot.", "slot_invalid");
   if (!slot.displayName || !slot.providerId || !slot.upstreamModel) throw apiError(400, "Display name, provider, and upstream model are required.", "slot_incomplete");
   if (!provider) throw apiError(400, "Choose an existing provider first.", "slot_provider_missing");
+  assertProviderModelSupported(provider, slot.upstreamModel);
   const index = settings.thirdPartySlots.findIndex((item) => item.id === slot.id);
   if (index >= 0) settings.thirdPartySlots[index] = slot; else settings.thirdPartySlots.push(slot);
   replaceSettings(settings);
@@ -1095,6 +1161,7 @@ async function saveSlotsBatch(req, res) {
   const models = [...new Set((Array.isArray(input.models) ? input.models : []).map((model) => String(model || "").trim()).filter(Boolean))];
   if (!models.length) throw apiError(400, "请至少选择一个上游模型。", "slot_batch_empty");
   if (models.some((model) => model.length > 120)) throw apiError(400, "上游模型 ID 不能超过 120 个字符。", "model_id_invalid");
+  for (const model of models) assertProviderModelSupported(provider, model);
   const duplicate = models.find((model) => settings.thirdPartySlots.some((slot) => slot.providerId === providerId && slot.upstreamModel === model));
   if (duplicate) throw apiError(409, `模型“${duplicate}”已经使用这个供应商添加。`, "slot_batch_duplicate");
   const occupied = new Set(settings.thirdPartySlots.map((slot) => slot.id));
@@ -1120,6 +1187,12 @@ function modelSlot(input, provider) {
     id: String(input.id || ""), displayName: String(input.displayName || "").trim(), providerId: String(input.providerId || ""), upstreamModel,
     contextWindow: capability.contextWindow, supportsImages: capability.supportsImages, reasoningPreset, dropParams: [],
   };
+}
+
+function assertProviderModelSupported(provider, model) {
+  if (provider?.responsesCompatibility === "deepseek" && String(model || "").trim().toLowerCase() !== "deepseek-v4-flash") {
+    throw apiError(400, "DeepSeek Responses 当前只支持 deepseek-v4-flash；DeepSeek-V4-Pro 暂不能作为 Codex Responses 模型发布。", "deepseek_responses_model_unsupported");
+  }
 }
 
 function friendlyModelName(value) {
@@ -1608,6 +1681,7 @@ function providerView(provider, settings = loadSettings(), compactCapabilities =
     name: provider.name,
     baseUrl: provider.baseUrl,
     apiType: provider.apiType,
+    responsesCompatibility: provider.responsesCompatibility || "standard",
     networkMode: providerNetworkMode(provider),
     proxyUrl: providerNetworkMode(provider) === "custom" ? normalizeProviderProxyUrl(provider.proxyUrl) : "",
     nativeResponseContinuation: provider.nativeResponseContinuation === true,
@@ -1626,6 +1700,9 @@ function providerView(provider, settings = loadSettings(), compactCapabilities =
 
 function providerCompactCapabilityView(provider, key, settings, compactCapabilities) {
   if (provider.apiType !== "responses") return { status: "not_applicable", verifiedAt: null };
+  // DeepSeek documents only the stateless Responses endpoint. Do not let the
+  // generic capability probe create an extra /responses/compact request.
+  if (provider.responsesCompatibility === "deepseek") return { status: "unsupported", verifiedAt: null };
   const models = [...new Set(settings.thirdPartySlots
     .filter((slot) => slot.providerId === provider.id)
     .map((slot) => String(slot.upstreamModel || "").trim())
@@ -1947,6 +2024,26 @@ function requestMetrics(body, headers = {}) {
     identitySource: identity.source,
     identityHash: identity.hash,
   };
+}
+
+function binaryRequestMetrics(byteLength, headers = {}) {
+  const identity = requestIdentity({}, headers);
+  return {
+    inboundBytes: byteLength,
+    inputBytes: byteLength,
+    toolsBytes: 0,
+    toolCount: 0,
+    previousResponseIdPresent: false,
+    promptCacheKeyPresent: false,
+    clientMetadataPresent: false,
+    turnMetadataPresent: Boolean(headerValue(headers, "x-codex-turn-metadata")),
+    identitySource: identity.source,
+    identityHash: identity.hash,
+  };
+}
+
+function isOfficialImageEditContentType(value) {
+  return /^(?:application\/json|multipart\/form-data)(?:\s*;|$)/i.test(String(value || ""));
 }
 
 function normalizeRequestMetrics(value) {
@@ -2361,6 +2458,10 @@ export function createRelayServer(options = {}) {
   primeRequestEvents();
   ensureThemeAgent();
   server = app(options);
+  archivePathRepairMonitor = options.archivePathMonitor
+    ? createArchivePathRepairMonitor(typeof options.archivePathMonitor === "object" ? options.archivePathMonitor : {})
+    : null;
+  if (archivePathRepairMonitor) server.once("listening", () => archivePathRepairMonitor?.start());
   const responsesWebSocket = attachResponsesWebSocket(server, {
     ...options.responsesWebSocket,
     history: chatHistory,
@@ -2371,6 +2472,8 @@ export function createRelayServer(options = {}) {
   const closeHttpServer = server.close.bind(server);
   server.close = function closeRelayServer(callback) {
     responsesWebSocket.close();
+    archivePathRepairMonitor?.close();
+    archivePathRepairMonitor = null;
     return closeHttpServer(async (error) => {
       await flushContextCache();
       try { await closeContextCacheWriter(); }
@@ -2387,7 +2490,7 @@ export function createRelayServer(options = {}) {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const cliServer = createRelayServer();
+  const cliServer = createRelayServer({ archivePathMonitor: true });
   let shuttingDown = false;
   const shutdown = () => {
     if (shuttingDown) return;

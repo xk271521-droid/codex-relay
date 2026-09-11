@@ -1,13 +1,13 @@
 # Codex Relay
 
-Codex Relay 是 Windows 本地多模型 Router 与桌面管理器。它保留 Codex 的官方登录和官方模型，同时将兼容的第三方 Responses、Chat Completions 和 DeepSeek 模型发布到 Codex 的同一模型选择器中。
+Codex Relay 是 Windows 本地多模型 Router 与桌面管理器。它保留 Codex 的官方登录和官方模型，同时将兼容的第三方 Responses（包括 DeepSeek Responses）和 Chat Completions 模型发布到 Codex 的同一模型选择器中。
 
 ```text
 Codex Desktop
   -> Codex Relay (127.0.0.1:15723)
      -> OpenAI official Responses
      -> Third-party Responses over HTTP/SSE
-     -> Chat/DeepSeek Chat Completions
+     -> Chat Completions
 ```
 
 ## 功能
@@ -17,12 +17,19 @@ Codex Desktop
 - 提供模型检测、请求记录、Token/缓存信息、使用量统计和本地主题管理。
 - 在“安全与恢复”中显式启用 Relay、恢复启用前的 Codex 配置，或切回官方直连。
 - 官方和第三方路由隔离。第三方普通聊天采用单次 HTTP/SSE 转发，不自动重发、不自动续接、不替第三方写入 `store`。
+- DeepSeek Responses 通过供应商编辑框中的 `DeepSeek Responses（Codex）` 模式接入，仅支持 `deepseek-v4-flash`；它直接使用 HTTP/SSE，不运行 DeepSeek 的配置脚本，也不改写现有 Codex 配置。
 
 ## 要求
 
 - Windows 10/11
 - 已安装并登录 Codex Desktop
 - Node.js `>=22.16.0`
+
+## Windows 安装包
+
+安装包不包含任何用户的 Codex 登录、第三方 API Key、聊天记录或 Relay 本地数据。安装后启动 `Codex Relay`，再在管理器中使用当前 Windows 用户自己的 Codex 登录和第三方配置。
+
+安装包为未签名的本地桌面软件，Windows 可能显示 SmartScreen 提示；仅应从可信发布者处取得并核对发布的 SHA-256。
 
 ## 从源码运行
 
@@ -43,6 +50,15 @@ npm.cmd start
 ```
 
 然后打开 `http://127.0.0.1:15723`。
+
+维护者构建 Windows 安装包：
+
+```powershell
+npm.cmd install
+npm.cmd run package:win
+```
+
+产物位于 `release\`。构建过程仅打入桌面运行时和所需应用文件，排除本机配置、日志、测试输出和项目内部文档。
 
 ## 配置与使用
 

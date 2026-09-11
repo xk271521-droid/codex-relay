@@ -55,7 +55,7 @@ async function ensureRouter() {
     return;
   }
 
-  ownedServer = createRelayServer();
+  ownedServer = createRelayServer({ archivePathMonitor: true });
   await new Promise((resolve, reject) => {
     const onError = (error) => reject(new Error(`本地 Router 启动失败：${error.message}`));
     ownedServer.once("error", onError);

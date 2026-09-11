@@ -444,6 +444,7 @@
         <label>供应商名称<input id="provider-name" maxlength="48" placeholder="例如：DeepSeek" required></label>
         <label>API 地址<input id="provider-url" type="url" placeholder="https://api.example.com/v1" required></label>
         <div class="field-pair"><label>接口格式<select id="provider-api"><option value="chat_completions">Chat Completions</option><option value="responses">Responses</option></select></label><label>API Key<input id="provider-key" type="password" autocomplete="off" placeholder="仅加密保存在本机"></label></div>
+        <label id="provider-responses-compatibility-row" hidden>Responses 兼容模式<select id="provider-responses-compatibility"><option value="standard">标准 Responses</option><option value="deepseek">DeepSeek Responses（Codex）</option></select><span class="field-hint">DeepSeek 模式仅发布 V4-Flash，使用可见上下文和兼容压缩，不启用原生续接或原生 Compact。</span></label>
         <div class="field-pair"><label>网络连接<select id="provider-network"><option value="direct">直连</option><option value="windows">跟随 Windows 代理</option><option value="custom">自定义代理</option></select></label><label id="provider-proxy-row" hidden>自定义 HTTP(S) 代理<input id="provider-proxy-url" type="url" placeholder="http://127.0.0.1:7897"></label></div>
         <p class="field-hint" id="provider-network-hint">直连只影响当前供应商，不改变官方或其他第三方。</p>
         <label class="checkbox confirm-check" id="provider-native-continuation-row" hidden><input id="provider-native-continuation" type="checkbox">启用 Responses 原生续接（试验）</label>

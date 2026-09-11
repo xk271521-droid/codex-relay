@@ -224,7 +224,12 @@ export async function forwardResponses({ settings, route, body, headers, signal,
   const contextMode = routingContextMode(settings, body, route, history);
   const thirdPartyKey = route.kind === "third_party" ? providerKey(route.providerId) : "";
   const expandedBody = expandRelayCompactions(body, route, thirdPartyKey);
-  const normalizedBody = rehydrateCrossRouteRequest(expandedBody, route, history, settings);
+  // DeepSeek's official Responses API is stateless. Rebuild visible context
+  // before stripping the response ID so a same-provider turn cannot lose its
+  // prior messages while other third-party providers retain their behavior.
+  const normalizedBody = rehydrateCrossRouteRequest(expandedBody, route, history, settings, {
+    forcePortableContext: isStatelessResponsesProvider(route.provider),
+  });
   if (route.kind === "official") {
     const bearer = officialAccessToken();
     if (!bearer) throw httpError(401, "Official route requires a saved official Codex sign-in. Sign in and verify the official channel again.", "official_auth_missing");
@@ -256,7 +261,7 @@ export async function forwardResponses({ settings, route, body, headers, signal,
   const key = thirdPartyKey;
   if (!key) throw httpError(400, `No API key is saved for ${route.provider.name}.`, "provider_key_missing");
   if (route.provider.apiType === "responses") {
-    const adapted = applyReasoningToResponsesPayload(stripUnsupported(normalizedBody, route.dropParams), route);
+    const adapted = applyReasoningToResponsesPayload(stripUnsupported(normalizedBody, responseDropParams(route)), route);
     let upstreamBody = { ...adapted.payload, model: route.upstreamModel };
     if (hasCompactionTrigger(upstreamBody)) {
       const response = await forwardThirdPartyCompatibleCompaction({ route, key, body: upstreamBody, requestedModel: body.model, signal, clientHeaders: headers, firstByteTimeoutMs: thirdPartyCompactionFirstByteTimeoutMs });
@@ -264,7 +269,7 @@ export async function forwardResponses({ settings, route, body, headers, signal,
       responseReasoningModes.set(response, adapted.reasoning);
       return response;
     }
-    if (route.provider.nativeResponseContinuation === true) upstreamBody.store = true;
+    if (route.provider.nativeResponseContinuation === true && !isStatelessResponsesProvider(route.provider)) upstreamBody.store = true;
     const currentInfo = routeHistoryInfo(route, key);
     const automaticContinuation = automaticNativeContinuation(route, key, upstreamBody, headers, history);
     if (automaticContinuation?.applied) upstreamBody = automaticContinuation.body;
@@ -285,7 +290,7 @@ export async function forwardResponses({ settings, route, body, headers, signal,
       const portable = automaticContinuation?.fallbackBody || rehydrateCrossRouteRequest(expandedBody, route, history, settings, { forcePortableContext: true });
       if (!portable.previous_response_id && portable !== expandedBody) {
         await response.body?.cancel();
-        const fallbackAdapted = applyReasoningToResponsesPayload(stripUnsupported(portable, route.dropParams), route);
+        const fallbackAdapted = applyReasoningToResponsesPayload(stripUnsupported(portable, responseDropParams(route)), route);
         upstreamBody = { ...fallbackAdapted.payload, model: route.upstreamModel };
         response = await fetchThirdPartyResponses(route, key, upstreamBody, signal, headers);
         diagnostics = requestDiagnostics(body, upstreamBody, {
@@ -359,7 +364,7 @@ export async function forwardResponsesCompact({ settings = null, route, body, he
   if (!key) throw httpError(400, `No API key is saved for ${route.provider.name}.`, "provider_key_missing");
   const expandedBody = expandRelayCompactions(body, route, key);
   if (route.provider.apiType === "responses") {
-    const upstreamBody = { ...stripUnsupported(expandedBody, route.dropParams), model: route.upstreamModel };
+    const upstreamBody = { ...stripUnsupported(expandedBody, responseDropParams(route)), model: route.upstreamModel };
     const nativeCompact = thirdPartyNativeCompactPlan(settings, route, key);
     return forwardThirdPartyCompatibleCompaction({ route, key, body: upstreamBody, requestedModel: body.model, signal, nativeCompact, compactCapabilityRecorder, clientHeaders: headers });
   }
@@ -443,6 +448,22 @@ export function forwardOfficialImageGeneration({ body, headers, signal, official
     method: "POST",
     headers: passthroughHeaders(headers, bearer, officialAccountId(), "application/json"),
     body: JSON.stringify(body || {}),
+    signal,
+  });
+}
+
+export function forwardOfficialImageEdit({ body, contentType, headers, signal, officialBaseUrl = OFFICIAL_CODEX_BASE_URL }) {
+  const bearer = officialAccessToken();
+  if (!bearer) throw httpError(401, "Official image editing requires a saved official Codex sign-in. Sign in and verify the official channel again.", "official_auth_missing");
+  if (!isOfficialImageEditContentType(contentType)) {
+    throw httpError(415, "Official image editing requires an application/json or multipart/form-data request body.", "image_edit_content_type");
+  }
+  return fetchOfficial(joinEndpoint(officialBaseUrl, "/images/edits"), {
+    method: "POST",
+    // Different Codex releases use JSON or multipart here. Preserve the raw
+    // body and content type so base64 or repeated image fields are never lost.
+    headers: passthroughHeaders(headers, bearer, officialAccountId(), "application/json", contentType, true),
+    body,
     signal,
   });
 }
@@ -1462,6 +1483,7 @@ function pruneThirdPartyCompactionState() {
 
 function thirdPartyNativeCompactPlan(settings, route, key) {
   if (!settings || route?.kind === "official" || route?.provider?.apiType !== "responses") return { attempt: false, reason: "not_enabled" };
+  if (isStatelessResponsesProvider(route.provider)) return { attempt: false, reason: "provider_no_native_compact" };
   const endpointUrl = providerCompactEndpoint(route.provider);
   const target = compactCapabilityTarget({ provider: route.provider, apiKey: key, upstreamModel: route.upstreamModel, endpointUrl });
   if (!target) return { attempt: false, reason: "ineligible_route" };
@@ -1946,15 +1968,20 @@ function compactionFirstByteDeadline(parentSignal, timeoutMs) {
   };
 }
 
-function passthroughHeaders(headers, bearer, accountId, accept = "text/event-stream") {
-  const result = { "content-type": "application/json", authorization: `Bearer ${bearer}`, accept };
+function passthroughHeaders(headers, bearer, accountId, accept = "text/event-stream", contentType = "application/json", preserveContentEncoding = false) {
+  const result = { "content-type": contentType, authorization: `Bearer ${bearer}`, accept };
   if (accountId) result["chatgpt-account-id"] = accountId;
   const skip = new Set(["authorization", "x-api-key", "api-key", "openai-api-key", "content-type", "content-length", "host", "connection", "transfer-encoding", "content-encoding", "accept-encoding"]);
+  if (preserveContentEncoding) skip.delete("content-encoding");
   for (const [name, value] of Object.entries(headers || {})) {
     if (skip.has(name.toLowerCase()) || value === undefined) continue;
     result[name] = Array.isArray(value) ? value.join(", ") : String(value);
   }
   return result;
+}
+
+function isOfficialImageEditContentType(value) {
+  return /^(?:application\/json|multipart\/form-data)(?:\s*;|$)/i.test(String(value || ""));
 }
 
 function routeHistoryInfo(route, key = "") {
@@ -2017,7 +2044,7 @@ function officialStoredBaselineBody(body) {
 }
 
 function automaticNativeContinuation(route, key, body, headers, history) {
-  if (body?.previous_response_id || route?.provider?.nativeResponseContinuation !== true || !history?.responseIdCandidate || !Array.isArray(body?.input)) return null;
+  if (body?.previous_response_id || isStatelessResponsesProvider(route?.provider) || route?.provider?.nativeResponseContinuation !== true || !history?.responseIdCandidate || !Array.isArray(body?.input)) return null;
   const taskHash = nativeTaskHash(body, headers);
   if (!taskHash) return null;
   const currentInfo = routeHistoryInfo(route, key);
@@ -2044,6 +2071,7 @@ function automaticNativeContinuation(route, key, body, headers, history) {
 
 function continuationDiagnostics(route, body, history, automaticContinuation) {
   if (route?.provider?.apiType !== "responses") return { mode: "not_responses" };
+  if (isStatelessResponsesProvider(route?.provider)) return { mode: "portable_context", reason: "provider_stateless" };
   if (body?.previous_response_id) {
     const previousInfo = history?.routeInfoFor?.(body.previous_response_id);
     const currentInfo = routeHistoryInfo(route, providerKey(route.providerId));
@@ -2066,7 +2094,7 @@ function responseIdStateForRecord(body, headers, route, response) {
   if (!responsesRoute) return null;
   if (!isStandardCompletedResponsesResult(response, route)) return null;
   const taskHash = nativeTaskHash(body, headers);
-  const storage = body?.store === false ? "not_stored" : null;
+  const storage = body?.store === false || isStatelessResponsesProvider(route?.provider) ? "not_stored" : null;
   if (!taskHash && !storage) return null;
   return normalizeResponseIdState({
     version: 1,
@@ -2093,7 +2121,7 @@ function normalizeResponseIdState(value) {
 }
 
 function nativeContinuationStateForRecord(body, headers, route, metadata = {}, response = null, responseIdState = null) {
-  const enabledThirdPartyRoute = route?.kind === "third_party" && route?.provider?.apiType === "responses" && route.provider.nativeResponseContinuation === true;
+  const enabledThirdPartyRoute = route?.kind === "third_party" && route?.provider?.apiType === "responses" && !isStatelessResponsesProvider(route.provider) && route.provider.nativeResponseContinuation === true;
   if (!responseIdState || body?.previous_response_id || !enabledThirdPartyRoute || !Array.isArray(body?.input)) return null;
   const taskHash = nativeTaskHash(body, headers);
   if (!taskHash) return null;
@@ -2182,4 +2210,11 @@ function sha256Text(value) { return crypto.createHash("sha256").update(String(va
 function joinEndpoint(baseUrl, endpoint) { return `${String(baseUrl).replace(/\/+$/, "")}${endpoint}`; }
 function providerEndpoint(provider, endpoint) { return provider.endpointUrl || joinEndpoint(provider.baseUrl, endpoint); }
 function stripUnsupported(body, fields = []) { const copy = structuredClone(body); for (const field of fields || []) delete copy[field]; return copy; }
+function isStatelessResponsesProvider(provider) { return provider?.apiType === "responses" && provider?.responsesCompatibility === "deepseek"; }
+function responseDropParams(route) {
+  const configured = Array.isArray(route?.dropParams) ? route.dropParams : [];
+  return isStatelessResponsesProvider(route?.provider)
+    ? [...new Set([...configured, "previous_response_id", "conversation", "store"])]
+    : configured;
+}
 function httpError(statusCode, message, code) { const error = new Error(message); error.statusCode = statusCode; error.code = code; return error; }

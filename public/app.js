@@ -6,7 +6,7 @@ const buttonLoadingStates = new WeakMap();
 const controlLoadingStates = new WeakMap();
 const $ = (selector) => document.querySelector(selector);
 const commonModels = [
-  "deepseek-chat", "deepseek-reasoner",
+  "deepseek-chat", "deepseek-reasoner", "deepseek-v4-flash",
   "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.4", "gpt-5.4-mini", "gpt-4.1", "gpt-4.1-mini",
   "kimi-k2.5", "kimi-k2-thinking", "kimi-k2-thinking-turbo",
   "qwen3-coder-plus", "qwen3-max", "qwen-plus", "qwen-turbo",
@@ -152,6 +152,7 @@ function bindStaticEvents() {
   $("#check-sessions-secondary").addEventListener("click", checkSessions);
   $("#add-provider").addEventListener("click", () => openProvider());
   $("#provider-api").addEventListener("change", syncProviderContinuationFields);
+  $("#provider-responses-compatibility").addEventListener("change", syncProviderContinuationFields);
   $("#provider-network").addEventListener("change", syncProviderNetworkFields);
   $("#provider-select").addEventListener("change", () => { updateModelSuggestions(); updateModelCapability(); });
   $("#slot-reasoning-preset").addEventListener("change", updateModelCapability);
@@ -1348,6 +1349,7 @@ function openProvider(provider = null) {
   $("#provider-name").value = provider?.name || "";
   $("#provider-url").value = provider?.baseUrl || "";
   $("#provider-api").value = provider?.apiType || "chat_completions";
+  $("#provider-responses-compatibility").value = provider?.responsesCompatibility || "standard";
   $("#provider-network").value = provider?.networkMode || "direct";
   $("#provider-proxy-url").value = provider?.proxyUrl || "";
   $("#provider-native-continuation").checked = provider?.nativeResponseContinuation === true;
@@ -1374,9 +1376,15 @@ function syncProviderNetworkFields() {
 
 function syncProviderContinuationFields() {
   const visible = $("#provider-api").value === "responses";
-  $("#provider-native-continuation-row").hidden = !visible;
+  const deepSeekResponses = visible && $("#provider-responses-compatibility").value === "deepseek";
+  $("#provider-responses-compatibility-row").hidden = !visible;
+  $("#provider-native-continuation-row").hidden = !visible || deepSeekResponses;
   $("#provider-native-continuation-hint").hidden = !visible;
-  if (!visible) $("#provider-native-continuation").checked = false;
+  if (!visible) $("#provider-responses-compatibility").value = "standard";
+  if (!visible || deepSeekResponses) $("#provider-native-continuation").checked = false;
+  $("#provider-native-continuation").disabled = deepSeekResponses;
+  if (deepSeekResponses) $("#provider-native-continuation-hint").textContent = "DeepSeek 官方 Responses 为无状态接口，Relay 固定使用可见上下文，不启用原生续接。";
+  else $("#provider-native-continuation-hint").textContent = "仅在该上游支持保存 response ID 时开启。Relay 会严格校验完整输入前缀；不同上游不传递响应 ID，拒绝后只回退一次完整上下文。";
 }
 
 async function saveProvider(event) {
@@ -1389,6 +1397,7 @@ async function saveProvider(event) {
       name: $("#provider-name").value,
       baseUrl: $("#provider-url").value,
       apiType: $("#provider-api").value,
+      responsesCompatibility: $("#provider-api").value === "responses" ? $("#provider-responses-compatibility").value : "standard",
       networkMode: $("#provider-network").value,
       proxyUrl: $("#provider-network").value === "custom" ? $("#provider-proxy-url").value : "",
       nativeResponseContinuation: $("#provider-api").value === "responses" && $("#provider-native-continuation").checked,

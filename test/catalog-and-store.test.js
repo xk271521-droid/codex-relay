@@ -32,9 +32,10 @@ const { classifyNativeCompactHttpResult, classifyNativeCompactTransportError, va
 const { clearCompactCapabilityProfiles, compactCapabilityStatus, compactCapabilityTarget, COMPACT_CAPABILITY_PROFILE_VERSION, recordCompactCapability } = await import("../src/compact-capabilities.js");
 const { resolveModelCapability } = await import("../src/model-capabilities.js");
 const { buildPerformanceBaseline } = await import("../src/performance-baseline.js");
-const { classifyPreviousResponseRejection, createChatHistory, forwardOfficialImageGeneration, forwardResponses, forwardResponsesCompact, providerCompactEndpoint, recordPassthroughResponse, responseContextMode, responseDiagnostics, responseHistoryInfo, routeForRequest } = await import("../src/router.js");
+const { classifyPreviousResponseRejection, createChatHistory, forwardOfficialImageEdit, forwardOfficialImageGeneration, forwardResponses, forwardResponsesCompact, providerCompactEndpoint, recordPassthroughResponse, responseContextMode, responseDiagnostics, responseHistoryInfo, routeForRequest } = await import("../src/router.js");
 const { attachResponsesWebSocket, waitForWebSocketCapacity } = await import("../src/responses-websocket.js");
 const { classifyContextPressure, classifyStreamingResponse, createRelayServer: createRawRelayServer, ensureCodexClosedForRestore, normalizeUsage, officialSessionAvailable, officialUpstreamFailure, onboardingState, pipeEventStream, resetModelHealthForTests } = await import("../src/server.js");
+const { createArchivePathRepairMonitor, runArchivePathRepairWorker } = await import("../src/archive-path-repair-monitor.js");
 const { readJsonRequest, RESPONSES_BODY_LIMIT_BYTES } = await import("../src/request-body.js");
 const requestHistory = await import("../src/request-history.js");
 const { localUsageDayKey } = await import("../src/usage-statistics.js");
@@ -919,6 +920,56 @@ test("GPT 5.6 Responses slots inherit Codex compact tool mode from the upstream 
   assert.equal(model.auto_compact_token_limit, undefined);
 });
 
+test("new Astra Responses slots publish image input capability", () => {
+  const provider = { id: "astra", name: "Astra", baseUrl: "https://astra.example/v1", apiType: "responses" };
+  const capability = resolveModelCapability("gpt-6-astra", { provider });
+  assert.equal(capability.supportsImages, true);
+  assert.equal(capability.contextWindow, 262_144);
+  assert.equal(capability.reasoning.preset, "openai");
+  assert.equal(capability.source, "builtin_profile");
+
+  const catalog = buildModelCatalog(settings({
+    providers: [provider],
+    thirdPartySlots: [{ id: "relay-third-party-1", displayName: "Astra", providerId: "astra", upstreamModel: "gpt-6-astra", supportsImages: true }],
+  }));
+  assert.deepEqual(catalog.models[0].input_modalities, ["text", "image"]);
+  assert.equal(catalog.models[0].supports_image_detail_original, true);
+});
+
+test("Gemini 3.8 Flash High publishes its documented 1M input context window", () => {
+  const provider = { id: "gemini", name: "Gemini", baseUrl: "https://gemini.example/v1", apiType: "responses" };
+  const capability = resolveModelCapability("gemini-3.8-flash-high", { provider });
+  assert.equal(capability.contextWindow, 1_048_576);
+  assert.equal(capability.supportsImages, true);
+  assert.equal(capability.source, "builtin_profile");
+
+  const catalog = buildModelCatalog(settings({
+    providers: [provider],
+    thirdPartySlots: [{ id: "relay-third-party-7", displayName: "Gemini 3.8 Flash High", providerId: "gemini", upstreamModel: "gemini-3.8-flash-high" }],
+  }));
+  assert.equal(catalog.models[0].context_window, 1_048_576);
+  assert.equal(catalog.models[0].max_context_window, 1_048_576);
+});
+
+test("known and unknown model profiles all publish image input without changing other capabilities", () => {
+  const responses = { id: "responses", name: "Responses", baseUrl: "https://example.test/v1", apiType: "responses" };
+  const known = [
+    ["deepseek-v4-flash", 1_000_000, "deepseek"],
+    ["kimi-k2.5", 262_144, "thinking"],
+    ["qwen3-coder-plus", 1_048_576, "thinking"],
+    ["glm-5.2", 1_000_000, "thinking"],
+    ["minimax-m2.1", 200_000, "thinking"],
+  ];
+  for (const [model, contextWindow, preset] of known) {
+    const capability = resolveModelCapability(model, { provider: responses });
+    assert.equal(capability.supportsImages, true, model);
+    assert.equal(capability.contextWindow, contextWindow, model);
+    assert.equal(capability.reasoning.preset, preset, model);
+  }
+  assert.equal(resolveModelCapability("brand-new-model", { provider: responses }).supportsImages, true);
+  assert.equal(resolveModelCapability("brand-new-chat-model", { provider: { ...responses, apiType: "chat_completions" } }).supportsImages, true);
+});
+
 test("Chat Completions slots do not receive the Responses Lite tool protocol", () => {
   const configured = settings({
     providers: [{ id: "chat", name: "Chat", baseUrl: "https://example.test/v1", apiType: "chat_completions" }],
@@ -930,7 +981,7 @@ test("Chat Completions slots do not receive the Responses Lite tool protocol", (
   assert.equal(model.multi_agent_version, undefined);
 });
 
-test("third-party upstream metadata overrides the conservative 5.6 compatibility context window", () => {
+test("third-party upstream metadata preserves context while image input remains enabled", () => {
   const provider = {
     id: "verified-provider",
     name: "Verified provider",
@@ -940,7 +991,7 @@ test("third-party upstream metadata overrides the conservative 5.6 compatibility
   };
   const capability = resolveModelCapability("gpt-5.6-terra", { provider });
   assert.equal(capability.contextWindow, 320_000);
-  assert.equal(capability.supportsImages, false);
+  assert.equal(capability.supportsImages, true);
   assert.equal(capability.source, "provider_metadata");
 });
 
@@ -1657,6 +1708,77 @@ test("official image generation uses saved Codex auth and never forwards client 
   }
 });
 
+test("official image editing preserves multipart reference bytes and never forwards client API keys", async () => {
+  resetTestState();
+  captureOfficialToken("official-image-edit-token");
+  let received;
+  const upstream = http.createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    received = { url: request.url, headers: request.headers, body: Buffer.concat(chunks) };
+    response.writeHead(200, { "content-type": "application/json", "x-request-id": "image-edit-request-id" });
+    response.end(JSON.stringify({ created: 1, data: [{ b64_json: "edited-image" }] }));
+  });
+  await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+  try {
+    const boundary = "codex-relay-test-boundary";
+    const body = Buffer.concat([
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="prompt"\r\n\r\nedit the marker\r\n--${boundary}\r\nContent-Disposition: form-data; name="image[]"; filename="reference.png"\r\nContent-Type: image/png\r\n\r\n`, "utf8"),
+      Buffer.from([0, 1, 2, 255]),
+      Buffer.from(`\r\n--${boundary}--\r\n`, "utf8"),
+    ]);
+    const contentType = `multipart/form-data; boundary=${boundary}`;
+    const response = await forwardOfficialImageEdit({
+      body,
+      contentType,
+      headers: { authorization: "Bearer client-token", "x-api-key": "client-key", "x-codex-client": "desktop" },
+      officialBaseUrl: `http://127.0.0.1:${upstream.address().port}/codex`,
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json()).data, [{ b64_json: "edited-image" }]);
+    assert.equal(received.url, "/codex/images/edits");
+    assert.equal(received.headers["content-type"], contentType);
+    assert.deepEqual(received.body, body);
+    assert.equal(received.headers.authorization, "Bearer official-image-edit-token");
+    assert.equal(received.headers["chatgpt-account-id"], "test-account");
+    assert.equal(received.headers["x-api-key"], undefined);
+    assert.equal(received.headers["x-codex-client"], "desktop");
+  } finally {
+    await new Promise((resolve) => upstream.close(resolve));
+  }
+});
+
+test("official image editing preserves Codex JSON reference payloads", async () => {
+  resetTestState();
+  captureOfficialToken("official-image-edit-json-token");
+  let received;
+  const upstream = http.createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    received = { url: request.url, headers: request.headers, body: Buffer.concat(chunks) };
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ created: 1, data: [{ b64_json: "edited-image" }] }));
+  });
+  await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+  try {
+    const body = Buffer.from(JSON.stringify({ prompt: "edit the marker", images: [{ b64_json: "AAEC/w==" }] }), "utf8");
+    const response = await forwardOfficialImageEdit({
+      body,
+      contentType: "application/json",
+      headers: { authorization: "Bearer client-token", "x-api-key": "client-key" },
+      officialBaseUrl: `http://127.0.0.1:${upstream.address().port}/codex`,
+    });
+    assert.equal(response.status, 200);
+    assert.equal(received.url, "/codex/images/edits");
+    assert.equal(received.headers["content-type"], "application/json");
+    assert.deepEqual(received.body, body);
+    assert.equal(received.headers.authorization, "Bearer official-image-edit-json-token");
+    assert.equal(received.headers["x-api-key"], undefined);
+  } finally {
+    await new Promise((resolve) => upstream.close(resolve));
+  }
+});
+
 test("image generation endpoint reports missing official auth instead of a generic 404", async () => {
   resetTestState();
   store.replaceSettings(settings({
@@ -1677,6 +1799,27 @@ test("image generation endpoint reports missing official auth instead of a gener
     const result = await response.json();
     assert.equal(result.error.code, "official_auth_missing");
     assert.doesNotMatch(JSON.stringify(result), /client-api-key/);
+
+    const boundary = "codex-relay-missing-auth";
+    const edit = await fetch(`http://127.0.0.1:${relay.address().port}/v1/images/edits`, {
+      method: "POST",
+      headers: { "content-type": `multipart/form-data; boundary=${boundary}`, authorization: "Bearer client-api-key" },
+      body: Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="prompt"\r\n\r\nedit\r\n--${boundary}--\r\n`, "utf8"),
+    });
+    assert.equal(edit.status, 401);
+    const editResult = await edit.json();
+    assert.equal(editResult.error.code, "official_auth_missing");
+    assert.doesNotMatch(JSON.stringify(editResult), /client-api-key/);
+
+    const jsonEdit = await fetch(`http://127.0.0.1:${relay.address().port}/v1/images/edits`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer client-api-key" },
+      body: JSON.stringify({ prompt: "edit", images: [{ b64_json: "AAEC/w==" }] }),
+    });
+    assert.equal(jsonEdit.status, 401);
+    const jsonEditResult = await jsonEdit.json();
+    assert.equal(jsonEditResult.error.code, "official_auth_missing");
+    assert.doesNotMatch(JSON.stringify(jsonEditResult), /client-api-key/);
   } finally {
     await new Promise((resolve) => relay.close(resolve));
   }
@@ -2782,6 +2925,81 @@ test("CC Switch custom history visibility migration preserves conversation conte
   assert.equal(stateDb.prepare("SELECT model_provider FROM threads WHERE id = ?").get("relay-new").model_provider, "openai");
   stateDb.close();
   resetTestState();
+});
+
+test("third-party archive compatibility normalizes only safe extended rollout paths in a worker and can roll back", async () => {
+  resetTestState();
+  const codexHome = path.dirname(store.paths().codexConfig);
+  const sessionDir = path.join(codexHome, "sessions", "2026", "08", "19");
+  fs.mkdirSync(sessionDir, { recursive: true });
+  const sessionPath = path.join(sessionDir, "rollout-third-party.jsonl");
+  fs.writeFileSync(sessionPath, `${JSON.stringify({ type: "session_meta", payload: { id: "thread-third-party", model_provider: "openai" } })}\n`, "utf8");
+  const extendedPath = `\\\\?\\${sessionPath}`;
+  const missingExtendedPath = `\\\\?\\${path.join(sessionDir, "missing.jsonl")}`;
+  const statePath = path.join(codexHome, "state_5.sqlite");
+  const db = new DatabaseSync(statePath);
+  db.exec("CREATE TABLE threads (id TEXT PRIMARY KEY, model TEXT, archived INTEGER NOT NULL DEFAULT 0, rollout_path TEXT);");
+  db.prepare("INSERT INTO threads (id, model, archived, rollout_path) VALUES (?, ?, ?, ?)").run("thread-third-party", "relay-third-party-3", 0, extendedPath);
+  db.prepare("INSERT INTO threads (id, model, archived, rollout_path) VALUES (?, ?, ?, ?)").run("thread-missing", "relay-third-party-7", 0, missingExtendedPath);
+  db.prepare("INSERT INTO threads (id, model, archived, rollout_path) VALUES (?, ?, ?, ?)").run("thread-official", "gpt-5.6-terra", 0, extendedPath);
+  db.close();
+
+  const preview = historyMigration.inspectCodexArchivePathCompatibility({ codexHome, relayHome: store.paths().appDir });
+  assert.equal(preview.fixable, 1);
+  assert.equal(preview.blocked.length, 1);
+  const repaired = await runArchivePathRepairWorker({ codexHome, relayHome: store.paths().appDir });
+  assert.equal(repaired.entries, 1);
+
+  const afterRepair = new DatabaseSync(statePath, { readOnly: true });
+  assert.equal(afterRepair.prepare("SELECT rollout_path FROM threads WHERE id = ?").get("thread-third-party").rollout_path, sessionPath);
+  assert.equal(afterRepair.prepare("SELECT rollout_path FROM threads WHERE id = ?").get("thread-official").rollout_path, extendedPath);
+  afterRepair.close();
+
+  const rolledBack = historyMigration.rollbackCodexArchivePaths({ codexHome, relayHome: store.paths().appDir });
+  assert.equal(rolledBack.restored, true);
+  assert.equal(rolledBack.entries, 1);
+  const afterRollback = new DatabaseSync(statePath, { readOnly: true });
+  assert.equal(afterRollback.prepare("SELECT rollout_path FROM threads WHERE id = ?").get("thread-third-party").rollout_path, extendedPath);
+  afterRollback.close();
+  resetTestState();
+});
+
+test("archive compatibility monitor delays and serializes third-party repair checks", async () => {
+  const calls = [];
+  let active = 0;
+  let highestActive = 0;
+  const monitor = createArchivePathRepairMonitor({
+    codexHome: path.dirname(store.paths().codexConfig),
+    relayHome: store.paths().appDir,
+    watch: false,
+    initialDelayMs: 1,
+    retryDelaysMs: [1, 2, 3],
+    runRepair: async () => {
+      active += 1;
+      highestActive = Math.max(highestActive, active);
+      calls.push(Date.now());
+      await new Promise((resolve) => setTimeout(resolve, 8));
+      active -= 1;
+      return { entries: 0 };
+    },
+  });
+  const waitFor = async (predicate, timeoutMs = 1_000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (predicate()) return;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.fail("archive compatibility monitor did not finish in time");
+  };
+  try {
+    monitor.start();
+    await waitFor(() => calls.length >= 1);
+    monitor.notifyThirdPartyTurn();
+    await waitFor(() => calls.length >= 2);
+    assert.equal(highestActive, 1);
+  } finally {
+    monitor.close();
+  }
 });
 
 test("history visibility preview rejects plan drift without changing a conversation", async () => {
@@ -9116,5 +9334,131 @@ test("HTTP third-party forward proxies reuse a keep-alive connection", async () 
     assert.equal(remotePorts[0], remotePorts[1]);
   } finally {
     await new Promise((resolve) => proxy.close(resolve));
+  }
+});
+
+test("DeepSeek Responses stays stateless without changing standard Responses routes", async () => {
+  resetTestState();
+  const received = [];
+  const upstream = http.createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    received.push({ path: request.url, body: JSON.parse(Buffer.concat(chunks).toString("utf8")) });
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      id: `resp_deepseek_${received.length}`,
+      object: "response",
+      status: "completed",
+      model: "deepseek-v4-flash",
+      output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "ok" }] }],
+    }));
+  });
+  await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+  try {
+    const baseUrl = `http://127.0.0.1:${upstream.address().port}/v1`;
+    const configured = settings({
+      providers: [
+        { id: "deepseek-responses", name: "DeepSeek Responses", baseUrl, apiType: "responses", responsesCompatibility: "deepseek", nativeResponseContinuation: true },
+        { id: "standard-responses", name: "Standard", baseUrl, apiType: "responses" },
+      ],
+      thirdPartySlots: [
+        { id: "relay-third-party-1", displayName: "DeepSeek V4 Flash", providerId: "deepseek-responses", upstreamModel: "deepseek-v4-flash", contextWindow: 1_000_000, supportsImages: false, dropParams: [] },
+        { id: "relay-third-party-2", displayName: "Standard", providerId: "standard-responses", upstreamModel: "standard-model", contextWindow: 128_000, supportsImages: false, dropParams: [] },
+      ],
+    });
+    store.replaceSettings(configured);
+    store.saveProviderKey("deepseek-responses", "deepseek-key");
+    store.saveProviderKey("standard-responses", "standard-key");
+
+    const deepSeekRoute = routeForRequest(configured, "relay-third-party-1");
+    const history = createChatHistory();
+    const firstBody = { model: deepSeekRoute.id, input: "first message", stream: false, store: true, conversation: "ignored" };
+    const first = await forwardResponses({ settings: configured, route: deepSeekRoute, body: firstBody, headers: {}, history });
+    const firstRaw = await first.text();
+    recordPassthroughResponse(history, firstBody, deepSeekRoute, firstRaw);
+    const firstId = JSON.parse(firstRaw).id;
+
+    const second = await forwardResponses({
+      settings: configured,
+      route: deepSeekRoute,
+      body: { model: deepSeekRoute.id, previous_response_id: firstId, input: "second message", stream: false, store: true, conversation: "ignored" },
+      headers: {},
+      history,
+    });
+    await second.text();
+
+    assert.equal(received[0].body.store, undefined);
+    assert.equal(received[0].body.conversation, undefined);
+    assert.equal(received[0].body.previous_response_id, undefined);
+    assert.equal(received[1].body.store, undefined);
+    assert.equal(received[1].body.conversation, undefined);
+    assert.equal(received[1].body.previous_response_id, undefined);
+    assert.match(JSON.stringify(received[1].body.input), /first message/);
+    assert.match(JSON.stringify(received[1].body.input), /second message/);
+
+    const compact = await forwardResponsesCompact({
+      settings: configured,
+      route: deepSeekRoute,
+      body: { model: deepSeekRoute.id, input: [{ role: "user", content: [{ type: "input_text", text: "compact this" }] }], stream: false },
+      headers: {},
+    });
+    assert.equal(compact.status, 200);
+    await compact.text();
+    assert.deepEqual(received.map((item) => item.path), ["/v1/responses", "/v1/responses", "/v1/responses"]);
+
+    const standardRoute = routeForRequest(configured, "relay-third-party-2");
+    const standard = await forwardResponses({
+      settings: configured,
+      route: standardRoute,
+      body: { model: standardRoute.id, previous_response_id: "resp_standard", input: "keep this field", stream: false, store: false },
+      headers: {},
+      history: createChatHistory(),
+    });
+    await standard.text();
+    assert.equal(received.at(-1).body.previous_response_id, undefined, "unknown standard IDs retain the existing portable fallback");
+    assert.equal(received.at(-1).body.store, false, "DeepSeek field filtering does not alter standard providers");
+  } finally {
+    await new Promise((resolve) => upstream.close(resolve));
+  }
+});
+
+test("DeepSeek Responses provider profile only publishes the supported Flash model", async () => {
+  resetTestState();
+  const relay = createRelayServer();
+  await new Promise((resolve) => relay.listen(0, "127.0.0.1", resolve));
+  try {
+    const baseUrl = `http://127.0.0.1:${relay.address().port}`;
+    const saved = await fetch(`${baseUrl}/api/providers`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "DeepSeek Responses",
+        baseUrl: "https://api.deepseek.com",
+        apiType: "responses",
+        responsesCompatibility: "deepseek",
+        nativeResponseContinuation: true,
+      }),
+    });
+    assert.equal(saved.status, 200);
+    const provider = (await saved.json()).provider;
+    assert.equal(provider.responsesCompatibility, "deepseek");
+    assert.equal(provider.nativeResponseContinuation, false);
+
+    const pro = await fetch(`${baseUrl}/api/slots`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "relay-third-party-1", displayName: "DeepSeek V4 Pro", providerId: provider.id, upstreamModel: "deepseek-v4-pro" }),
+    });
+    assert.equal(pro.status, 400);
+    assert.equal((await pro.json()).error.code, "deepseek_responses_model_unsupported");
+
+    const flash = await fetch(`${baseUrl}/api/slots`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "relay-third-party-1", displayName: "DeepSeek V4 Flash", providerId: provider.id, upstreamModel: "deepseek-v4-flash" }),
+    });
+    assert.equal(flash.status, 200);
+  } finally {
+    await new Promise((resolve) => relay.close(resolve));
   }
 });

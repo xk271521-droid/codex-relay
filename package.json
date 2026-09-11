@@ -10,6 +10,7 @@
   "scripts": {
     "start": "node src/server.js",
     "desktop": "electron .",
+    "package:win": "electron-builder --win nsis --publish never",
     "generate:icons": "node scripts/generate-icons.mjs",
     "report:s4a": "node scripts/s4a-performance-report.mjs",
     "test": "node --test --test-concurrency=1 test/catalog-and-store.test.js test/cc-relay-differential.test.js",
@@ -24,8 +25,50 @@
   },
   "devDependencies": {
     "electron": "42.4.1",
+    "electron-builder": "26.15.3",
     "playwright-core": "^1.55.0",
     "png-to-ico": "^3.0.2",
     "sharp": "^0.35.3"
+  },
+  "build": {
+    "appId": "io.codexrelay.desktop",
+    "productName": "Codex Relay",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "artifactName": "Codex-Relay-Setup-${version}.${ext}",
+    "files": [
+      "desktop/**/*",
+      "src/**/*",
+      "public/**/*",
+      "assets/**/*",
+      "package.json",
+      "!**/*.log",
+      "!docs/**",
+      "!outputs/**",
+      "!work/**",
+      "!videos/**",
+      "!AGENTS.md",
+      "!COMPATIBILITY_AND_SAFETY.md",
+      "!CURRENT_STATE.md",
+      "!DESIGN.md",
+      "!PRODUCT.md",
+      "!PROJECT_PLAN.md",
+      "!PHASE_EXECUTION_PLAN.md"
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Codex Relay"
+    }
   }
 }

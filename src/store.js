@@ -756,9 +756,13 @@ function normalizeProvider(provider) {
     balanceProbe: normalizeBalanceProbe(provider?.balanceProbe),
     modelCapabilities: normalizeModelCapabilities(provider?.modelCapabilities),
     apiType: provider?.apiType === "responses" ? "responses" : "chat_completions",
+    // Compatibility is explicit rather than inferred from a provider name. That
+    // keeps an existing DeepSeek Chat provider and every other Responses
+    // provider on their current behavior.
+    responsesCompatibility: provider?.apiType === "responses" && provider?.responsesCompatibility === "deepseek" ? "deepseek" : "standard",
     networkMode,
     proxyUrl: networkMode === "custom" ? normalizeProviderProxyUrl(provider?.proxyUrl) : "",
-    nativeResponseContinuation: provider?.apiType === "responses" && provider?.nativeResponseContinuation === true,
+    nativeResponseContinuation: provider?.apiType === "responses" && provider?.responsesCompatibility !== "deepseek" && provider?.nativeResponseContinuation === true,
     note: String(provider?.note || "").trim(),
     authHeaderName: headerName(provider?.authHeaderName) || "authorization",
     authHeaderPrefix: String(provider?.authHeaderPrefix ?? "Bearer ").replace(/[\r\n]/g, "").slice(0, 80),

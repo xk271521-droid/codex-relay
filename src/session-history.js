@@ -11,6 +11,8 @@ const BACKUP_GROUP = "cc-switch-history-unify-v1";
 const SOURCE_PROVIDER = "custom";
 const TARGET_PROVIDER = "openai";
 const CODEX_STATE_DB_FILENAME = "state_5.sqlite";
+const ARCHIVE_PATH_REPAIR_MANIFEST_NAME = "codex-archive-path-repair.json";
+const THIRD_PARTY_MODEL_PATTERN = /^relay-third-party-\d+$/;
 let historyOperationActive = false;
 
 export function inspectCodexHistoryBuckets(options = {}) {
@@ -113,6 +115,163 @@ export function codexSessionIndexInventory(options = {}) {
     supported,
     ids: [...ids].sort(),
   };
+}
+
+export function codexArchivePathDatabaseTargets(options = {}) {
+  const codexHome = path.resolve(options.codexHome || DEFAULT_CODEX_HOME);
+  return codexStateDatabaseCandidates(codexHome, options);
+}
+
+// Codex Desktop's local archive service compares rollout_path with the normal
+// sessions directory.  Windows extended paths (\\?\C:\...) are valid for
+// file I/O but fail that comparison, so this compatibility repair only removes
+// the prefix after verifying the file remains inside .codex\sessions.
+export function inspectCodexArchivePathCompatibility(options = {}) {
+  const codexHome = path.resolve(options.codexHome || DEFAULT_CODEX_HOME);
+  const relayHome = path.resolve(options.relayHome || DEFAULT_RELAY_HOME);
+  const databases = [];
+  const candidates = [];
+  const blocked = [];
+  let supported = true;
+  for (const target of codexStateDatabases(codexHome, options)) {
+    const result = readArchivePathCandidates(target, codexHome);
+    if (!result.supported) {
+      supported = false;
+      databases.push({ path: displayDatabasePath(codexHome, target), supported: false, candidates: 0, blocked: 0 });
+      continue;
+    }
+    databases.push({
+      path: displayDatabasePath(codexHome, target),
+      supported: true,
+      candidates: result.candidates.length,
+      blocked: result.blocked.length,
+    });
+    candidates.push(...result.candidates.map((entry) => ({ ...entry, database: displayDatabasePath(codexHome, target) })));
+    blocked.push(...result.blocked.map((entry) => ({ ...entry, database: displayDatabasePath(codexHome, target) })));
+  }
+  return {
+    codexHome,
+    available: databases.length > 0,
+    supported,
+    databases,
+    candidates,
+    blocked,
+    fixable: candidates.length,
+    active: Boolean(readArchivePathRepairManifest(relayHome)),
+  };
+}
+
+export function repairCodexArchivePaths(options = {}) {
+  return runHistoryOperationSync(() => repairCodexArchivePathsInner(options));
+}
+
+export function rollbackCodexArchivePaths(options = {}) {
+  return runHistoryOperationSync(() => rollbackCodexArchivePathsInner(options));
+}
+
+function repairCodexArchivePathsInner(options = {}) {
+  const codexHome = path.resolve(options.codexHome || DEFAULT_CODEX_HOME);
+  const relayHome = path.resolve(options.relayHome || DEFAULT_RELAY_HOME);
+  const inspection = inspectCodexArchivePathCompatibility({ ...options, codexHome, relayHome });
+  if (!inspection.supported) throw historyError("Codex state database schema does not expose archive paths.", "archive_path_schema_unsupported");
+  if (!inspection.fixable) {
+    return { repaired: false, reused: Boolean(inspection.active), entries: 0, blocked: inspection.blocked.length, inspection };
+  }
+
+  const manifestPath = path.join(relayHome, ARCHIVE_PATH_REPAIR_MANIFEST_NAME);
+  const previous = readArchivePathRepairManifest(relayHome);
+  const priorEntries = previous?.entries || [];
+  const known = new Set(priorEntries.map((entry) => `${entry.database}\u0000${entry.id}`));
+  const entries = [...priorEntries];
+  for (const entry of inspection.candidates) {
+    const key = `${entry.database}\u0000${entry.id}`;
+    if (!known.has(key)) {
+      entries.push({
+        database: path.resolve(codexHome, entry.database),
+        id: entry.id,
+        model: entry.model,
+        oldPath: entry.rawPath,
+        newPath: entry.normalizedPath,
+      });
+      known.add(key);
+    }
+  }
+  const manifest = {
+    version: 1,
+    createdAt: previous?.createdAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    codexHome,
+    entries,
+  };
+  fs.mkdirSync(relayHome, { recursive: true });
+  writeJsonAtomic(manifestPath, manifest);
+
+  const changed = [];
+  const groups = new Map();
+  for (const entry of inspection.candidates) {
+    const database = path.resolve(codexHome, entry.database);
+    if (!groups.has(database)) groups.set(database, []);
+    groups.get(database).push(entry);
+  }
+  try {
+    for (const [database, group] of groups) {
+      const db = new DatabaseSync(database);
+      try {
+        if (!hasArchivePathColumns(db)) throw historyError(`Codex state database has no archive path index: ${database}`, "archive_path_schema_unsupported");
+        db.exec("BEGIN IMMEDIATE");
+        const update = db.prepare("UPDATE threads SET rollout_path = ? WHERE id = ? AND model = ? AND COALESCE(archived, 0) = 0 AND rollout_path = ?");
+        for (const entry of group) {
+          const result = update.run(entry.normalizedPath, entry.id, entry.model, entry.rawPath);
+          if (Number(result.changes || 0) !== 1) throw historyError(`The Codex thread changed while archive compatibility was being repaired: ${entry.id}`, "archive_path_changed");
+          changed.push(entry);
+        }
+        db.exec("COMMIT");
+      } catch (error) {
+        try { db.exec("ROLLBACK"); } catch { /* The transaction may not have started. */ }
+        throw error;
+      } finally {
+        db.close();
+      }
+    }
+    return { repaired: changed.length > 0, reused: false, entries: changed.length, blocked: inspection.blocked.length, manifest, inspection };
+  } catch (error) {
+    if (!previous) fs.rmSync(manifestPath, { force: true });
+    throw error;
+  }
+}
+
+function rollbackCodexArchivePathsInner(options = {}) {
+  const codexHome = path.resolve(options.codexHome || DEFAULT_CODEX_HOME);
+  const relayHome = path.resolve(options.relayHome || DEFAULT_RELAY_HOME);
+  const manifest = readArchivePathRepairManifest(relayHome);
+  if (!manifest) return { restored: false, entries: 0 };
+  const groups = new Map();
+  for (const entry of manifest.entries || []) {
+    const database = path.resolve(entry.database);
+    if (!groups.has(database)) groups.set(database, []);
+    groups.get(database).push(entry);
+  }
+  let restored = 0;
+  for (const [database, group] of groups) {
+    const db = new DatabaseSync(database);
+    try {
+      if (!hasArchivePathColumns(db)) throw historyError(`Codex state database has no archive path index: ${database}`, "archive_path_schema_unsupported");
+      db.exec("BEGIN IMMEDIATE");
+      const update = db.prepare("UPDATE threads SET rollout_path = ? WHERE id = ? AND rollout_path = ?");
+      for (const entry of group) {
+        const result = update.run(entry.oldPath, entry.id, entry.newPath);
+        if (Number(result.changes || 0) === 1) restored += 1;
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      try { db.exec("ROLLBACK"); } catch { /* The transaction may not have started. */ }
+      throw error;
+    } finally {
+      db.close();
+    }
+  }
+  fs.rmSync(path.join(relayHome, ARCHIVE_PATH_REPAIR_MANIFEST_NAME), { force: true });
+  return { restored: true, entries: restored, codexHome };
 }
 
 export async function migrateCodexCustomHistory(options = {}) {
@@ -451,6 +610,65 @@ function databaseAllThreadIds(target) {
     return null;
   } finally {
     try { db?.close(); } catch { /* Ignore close failures during inspection. */ }
+  }
+}
+
+function readArchivePathCandidates(target, codexHome) {
+  let db;
+  try {
+    db = new DatabaseSync(target, { readOnly: true });
+    if (!hasArchivePathColumns(db)) return { supported: false, candidates: [], blocked: [] };
+    const rows = db.prepare("SELECT id, model, archived, rollout_path FROM threads WHERE COALESCE(archived, 0) = 0").all();
+    const candidates = [];
+    const blocked = [];
+    for (const row of rows) {
+      if (!THIRD_PARTY_MODEL_PATTERN.test(String(row.model || ""))) continue;
+      const rawPath = String(row.rollout_path || "");
+      const normalizedPath = stripWindowsExtendedPrefix(rawPath);
+      if (!normalizedPath || normalizedPath === rawPath) continue;
+      const status = archivePathStatus(codexHome, normalizedPath);
+      const item = { id: String(row.id), model: String(row.model), rawPath, normalizedPath, reason: status.reason || null };
+      if (status.fixable) candidates.push(item);
+      else blocked.push(item);
+    }
+    return { supported: true, candidates, blocked };
+  } catch {
+    return { supported: false, candidates: [], blocked: [] };
+  } finally {
+    try { db?.close(); } catch { /* Ignore read-only inspection failures. */ }
+  }
+}
+
+function hasArchivePathColumns(db) {
+  const table = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'threads'").get();
+  if (!table) return false;
+  const columns = new Set(db.prepare("PRAGMA table_info(threads)").all().map((column) => column.name));
+  return columns.has("id") && columns.has("model") && columns.has("archived") && columns.has("rollout_path");
+}
+
+function archivePathStatus(codexHome, normalizedPath) {
+  const target = path.resolve(normalizedPath);
+  const sessionsRoot = path.resolve(codexHome, "sessions");
+  const relative = path.relative(sessionsRoot, target);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return { fixable: false, reason: "outside_sessions" };
+  if (!fs.existsSync(target) || !fs.statSync(target).isFile()) return { fixable: false, reason: "rollout_missing" };
+  return { fixable: true, reason: null };
+}
+
+function stripWindowsExtendedPrefix(value) {
+  const prefix = "\\\\?\\";
+  if (!String(value || "").startsWith(prefix)) return String(value || "");
+  const stripped = String(value).slice(prefix.length);
+  return /^UNC\\/i.test(stripped) ? `\\\\${stripped.slice(4)}` : stripped;
+}
+
+function readArchivePathRepairManifest(relayHome) {
+  try {
+    const manifest = JSON.parse(fs.readFileSync(path.join(relayHome, ARCHIVE_PATH_REPAIR_MANIFEST_NAME), "utf8"));
+    if (manifest?.version !== 1 || !Array.isArray(manifest.entries)) return null;
+    return manifest;
+  } catch {
+    return null;
   }
 }
 

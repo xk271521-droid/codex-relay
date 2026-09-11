@@ -10,16 +10,22 @@ const PROFILES = [
   { pattern: /^gpt-5\.6-terra$/i, contextWindow: 272_000, supportsImages: true, reasoningPreset: "gpt_six", defaultReasoningLevel: "medium", useResponsesLite: true, toolMode: "code_mode_only", multiAgentVersion: "v2", includeSkillsUsageInstructions: false, supportsReasoningSummaries: true, defaultReasoningSummary: "none", supportVerbosity: true, defaultVerbosity: "low", supportsSearchTool: true, webSearchToolType: "text_and_image", compHash: "3000", truncationLimit: 10_000 },
   { pattern: /^gpt-5\.6-luna$/i, contextWindow: 272_000, supportsImages: true, reasoningPreset: "gpt_six", defaultReasoningLevel: "medium", useResponsesLite: true, toolMode: "code_mode_only", multiAgentVersion: "v1", includeSkillsUsageInstructions: false, supportsReasoningSummaries: true, defaultReasoningSummary: "none", supportVerbosity: true, defaultVerbosity: "low", supportsSearchTool: true, webSearchToolType: "text_and_image", compHash: "3000", truncationLimit: 10_000 },
   { pattern: /^gpt-5\.6(?:-|$)/i, contextWindow: 272_000, supportsImages: true, reasoningPreset: "gpt_six" },
+  // Astra is a newer Responses model; keep the conservative context size but
+  // expose its native image input so Codex does not hide the attachment control.
+  { pattern: /^gpt-6-astra$/i, contextWindow: 262_144, supportsImages: true, reasoningPreset: "openai" },
   { pattern: /^gpt-5\.5(?:-|$)/i, contextWindow: 272_000, supportsImages: true, reasoningPreset: "openai" },
   { pattern: /^gpt-5\.4(?:-|$)/i, contextWindow: 272_000, supportsImages: true, reasoningPreset: "openai" },
   { pattern: /^gpt-4\.1(?:-|$)/i, contextWindow: 1_047_576, supportsImages: true },
-  { pattern: /^deepseek-v4-(?:pro|flash)$/i, contextWindow: 1_000_000, supportsImages: false, reasoningPreset: "deepseek" },
-  { pattern: /^deepseek-(?:chat|reasoner)$/i, contextWindow: 128_000, supportsImages: false, reasoningPreset: "deepseek" },
-  { pattern: /^kimi-k2(?:\.5|-thinking|-thinking-turbo|\.7-code)/i, contextWindow: 262_144, supportsImages: false, reasoningPreset: "thinking" },
-  { pattern: /^qwen3-coder-plus$/i, contextWindow: 1_048_576, supportsImages: false, reasoningPreset: "thinking" },
-  { pattern: /^glm-5\.2$/i, contextWindow: 1_000_000, supportsImages: false, reasoningPreset: "thinking" },
-  { pattern: /^glm-4\.(?:7|7-flash|5-air)$/i, contextWindow: 128_000, supportsImages: false, reasoningPreset: "thinking" },
-  { pattern: /^minimax-m2(?:\.1|-lightning)/i, contextWindow: 200_000, supportsImages: false, reasoningPreset: "thinking" },
+  { pattern: /^deepseek-v4-(?:pro|flash)$/i, contextWindow: 1_000_000, supportsImages: true, reasoningPreset: "deepseek" },
+  { pattern: /^deepseek-(?:chat|reasoner)$/i, contextWindow: 128_000, supportsImages: true, reasoningPreset: "deepseek" },
+  { pattern: /^kimi-k2(?:\.5|-thinking|-thinking-turbo|\.7-code)/i, contextWindow: 262_144, supportsImages: true, reasoningPreset: "thinking" },
+  { pattern: /^qwen3-coder-plus$/i, contextWindow: 1_048_576, supportsImages: true, reasoningPreset: "thinking" },
+  // Gemini API documents Gemini 3.8 Flash with a 1,048,576-token input limit.
+  // This exact gateway variant otherwise falls through to the 262,144 Responses default.
+  { pattern: /^gemini-3\.8-flash-high$/i, contextWindow: 1_048_576, supportsImages: true },
+  { pattern: /^glm-5\.2$/i, contextWindow: 1_000_000, supportsImages: true, reasoningPreset: "thinking" },
+  { pattern: /^glm-4\.(?:7|7-flash|5-air)$/i, contextWindow: 128_000, supportsImages: true, reasoningPreset: "thinking" },
+  { pattern: /^minimax-m2(?:\.1|-lightning)/i, contextWindow: 200_000, supportsImages: true, reasoningPreset: "thinking" },
 ];
 
 let codexCache = { mtimeMs: -1, models: new Map() };
@@ -30,11 +36,11 @@ export function resolveModelCapability(modelId, { provider = null, reasoningPres
   const local = localCodexModels().get(id.toLowerCase());
   const profile = PROFILES.find((item) => item.pattern.test(id));
   const fallback = provider?.apiType === "responses"
-    ? { contextWindow: 262_144, supportsImages: false, source: "responses_default" }
-    : { contextWindow: 128_000, supportsImages: false, source: "chat_default" };
-  // Provider-scoped metadata wins when the upstream exposes it. Known upstream
-  // IDs otherwise use a conservative compatibility profile; stale slot values
-  // and unrelated official-client cache entries must not inflate that fallback.
+    ? { contextWindow: 262_144, supportsImages: true, source: "responses_default" }
+    : { contextWindow: 128_000, supportsImages: true, source: "chat_default" };
+  // Provider-scoped metadata still controls context and reasoning details. Image
+  // input is intentionally enabled for every published model, including new IDs
+  // and stale caches, so Codex keeps the attachment control available.
   const base = provider
     ? profile
       ? { ...profileWithoutPattern(profile), source: "builtin_profile" }
@@ -47,7 +53,7 @@ export function resolveModelCapability(modelId, { provider = null, reasoningPres
   const capability = discovered && typeof discovered === "object"
     ? { ...base, ...discovered, source: "provider_metadata" }
     : base;
-  return { ...capability, reasoning: resolveReasoningCapability(id, { provider, preset: reasoningPreset, discovered: discovered || local }) };
+  return { ...capability, supportsImages: true, reasoning: resolveReasoningCapability(id, { provider, preset: reasoningPreset, discovered: discovered || local }) };
 }
 
 export function resolveCodexRuntimeProfile(modelId, preferred = null) {

@@ -163,7 +163,7 @@ function pooledConnectAgent(proxyUrl) {
 
 function requestResponse(rawUrl, options, agent) {
   const target = new URL(rawUrl);
-  const body = options.body === undefined || options.body === null ? "" : String(options.body);
+  const body = requestBody(options.body);
   const headers = { ...(options.headers || {}) };
   if (body && !headerValue(headers, "content-length")) headers["content-length"] = String(Buffer.byteLength(body));
   const transport = target.protocol === "https:" ? https : http;
@@ -214,7 +214,7 @@ function requestResponse(rawUrl, options, agent) {
 function requestResponseViaForwardProxy(rawUrl, options, proxyUrl) {
   const target = new URL(rawUrl);
   const proxy = new URL(proxyUrl);
-  const body = options.body === undefined || options.body === null ? "" : String(options.body);
+  const body = requestBody(options.body);
   const headers = { ...(options.headers || {}) };
   if (body && !headerValue(headers, "content-length")) headers["content-length"] = String(Buffer.byteLength(body));
   if (!headerValue(headers, "host")) headers.host = target.host;
@@ -326,6 +326,14 @@ function withIdentityEncoding(options) {
 function proxyAuthorization(proxy) {
   if (!proxy.username && !proxy.password) return "";
   return `Basic ${Buffer.from(`${decodeURIComponent(proxy.username)}:${decodeURIComponent(proxy.password)}`).toString("base64")}`;
+}
+
+function requestBody(value) {
+  if (value === undefined || value === null) return "";
+  if (Buffer.isBuffer(value)) return value;
+  if (value instanceof Uint8Array) return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+  if (value instanceof ArrayBuffer) return Buffer.from(value);
+  return String(value);
 }
 
 function headerValue(headers, expected) {
